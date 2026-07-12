@@ -90,12 +90,14 @@ export class EventManager {
     const budgets = resolver.resolveThinkingBudgets();
     const thinking_budget_tokens = budgets[level];
 
-    // Setup payload
+    // Setup payload — always request prompt progress for prefill stats
+    const base = { ...payload, return_progress: true as any };
+
     if (level === "off")
-      return { ...payload, chat_template_kwargs: { enable_thinking: false } };
+      return { ...base, chat_template_kwargs: { enable_thinking: false } };
 
-    if (level === "max") return payload;
+    if (level === "max") return base;
 
-    return { ...payload, thinking_budget_tokens };
+    return { ...base, thinking_budget_tokens };
   }
 }

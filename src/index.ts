@@ -11,6 +11,7 @@ import { ModelSelectEvent } from "./interfaces/events";
 import { CommandManager } from "./managers/command";
 import { EventManager } from "./managers/events";
 import { ServerManager } from "./managers/server";
+import { PrefillProgressManager } from "./prefill-progress";
 import { ConfigResolver } from "./resolver";
 import { Server } from "./server";
 
@@ -22,6 +23,10 @@ export default async function (pi: ExtensionAPI) {
   const eventManager = new EventManager(servers);
   const serverManager = new ServerManager(servers);
   const commandManager = new CommandManager(serverManager);
+  const prefillProgress = new PrefillProgressManager(servers);
+
+  // Install fetch interceptor for prompt progress tracking
+  prefillProgress.install();
 
   // Register providers once at startup
   await serverManager.initialize(pi);
@@ -45,6 +50,10 @@ export default async function (pi: ExtensionAPI) {
       ctx.ui.notify(warning, "warning");
   });
 
+  pi.on("before_agent_start", (_event: unknown, ctx: ExtensionContext) => {
+    prefillProgress.onBeforeAgentStart(ctx);
+  });
+
   pi.on(
     "before_provider_request",
     async (event: BeforeProviderRequestEvent) =>
@@ -61,4 +70,12 @@ export default async function (pi: ExtensionAPI) {
     async (_: SessionBeforeSwitchEvent, ctx: ExtensionContext) =>
       await eventManager.onSessionBeforeSwitch(ctx),
   );
+
+  pi.on("turn_end", (_event: unknown, ctx: ExtensionContext) => {
+    prefillProgress.onTurnEnd(ctx);
+  });
+
+  pi.on("session_shutdown", async () => {
+    prefillProgress.uninstall();
+  });
 }
