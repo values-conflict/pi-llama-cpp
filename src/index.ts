@@ -11,7 +11,7 @@ import { ModelSelectEvent } from "./interfaces/events";
 import { CommandManager } from "./managers/command";
 import { EventManager } from "./managers/events";
 import { ServerManager } from "./managers/server";
-import { PrefillProgressManager } from "./prefill-progress";
+import { InferenceStatusManager } from "./inference-status";
 import { ConfigResolver } from "./resolver";
 import { Server } from "./server";
 
@@ -23,10 +23,10 @@ export default async function (pi: ExtensionAPI) {
   const eventManager = new EventManager(servers);
   const serverManager = new ServerManager(servers);
   const commandManager = new CommandManager(serverManager);
-  const prefillProgress = new PrefillProgressManager(servers);
+  const inferenceStatus = new InferenceStatusManager(servers);
 
-  // Install fetch interceptor for prompt progress tracking
-  prefillProgress.install();
+  // Install fetch interceptor for inference status tracking
+  inferenceStatus.install();
 
   // Register providers once at startup
   await serverManager.initialize(pi);
@@ -51,7 +51,11 @@ export default async function (pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (_event: unknown, ctx: ExtensionContext) => {
-    prefillProgress.onBeforeAgentStart(ctx);
+    inferenceStatus.onBeforeAgentStart(ctx);
+  });
+
+  pi.on("turn_start", (_event: unknown, ctx: ExtensionContext) => {
+    inferenceStatus.onTurnStart(ctx);
   });
 
   pi.on(
@@ -72,10 +76,10 @@ export default async function (pi: ExtensionAPI) {
   );
 
   pi.on("turn_end", (_event: unknown, ctx: ExtensionContext) => {
-    prefillProgress.onTurnEnd(ctx);
+    inferenceStatus.onTurnEnd(ctx);
   });
 
   pi.on("session_shutdown", async () => {
-    prefillProgress.uninstall();
+    inferenceStatus.uninstall();
   });
 }

@@ -90,8 +90,14 @@ export class EventManager {
     const budgets = resolver.resolveThinkingBudgets();
     const thinking_budget_tokens = budgets[level];
 
-    // Setup payload — always request prompt progress for prefill stats
-    const base = { ...payload, return_progress: true as any };
+    // Setup payload — always request prompt progress and per-token timings.
+    // `return_progress` drives the prefill progress bar;
+    // `timings_per_token` gives us ground-truth TPS during generation.
+    const base = {
+      ...payload,
+      return_progress: true as any,
+      timings_per_token: true as any,
+    };
 
     if (level === "off")
       return { ...base, chat_template_kwargs: { enable_thinking: false } };

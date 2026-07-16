@@ -1,6 +1,6 @@
 /**
- * PrefillProgressManager — intercepts llama.cpp SSE responses to show prompt
- * processing progress in Pi's working message.
+ * InferenceStatusManager — intercepts llama.cpp SSE responses to show prompt
+ * processing progress and live token-generation stats in Pi's working message.
  *
  * Unlike the standalone pi-llama-cpp-stats extension, this uses known server
  * baseUrls from the Server instances so URL matching is exact (no guessing).
@@ -18,12 +18,28 @@ let hasReceivedPrefill = false;
 let uiRef: any = null;
 let hasUIRef = false;
 
-// Track instantaneous TPS measurements for rate curve fitting
+// Track instantaneous TPS measurements for rate curve fitting (prefill)
 const rateHistory: { processed: number; tps: number }[] = [];
 const MAX_RATE_POINTS = 20;
+
+// Minimum meaningful time delta (ms) to avoid bogus TPS from sub-ms precision.
+// Two SSE chunks can share the same millisecond timestamp on fast GPUs,
+// producing deltaT ≈ 0 and TPS in the hundreds of thousands.
+const MIN_DELTA_MS = 1;
+
+// Sanity cap for displayed TPS — no consumer GPU hits this during inference.
+// Catches unit-mismatch bugs (us vs ms) or floating-point edge cases.
+const MAX_REASONABLE_TPS = 50_000;
+
 let originalFetch: typeof fetch | null = null;
 
-export class PrefillProgressManager {
+// Generation-phase state — populated from `timings` in each SSE chunk
+let genPredictedN = 0;
+let genPredictedMs = 0;
+let genStartTime = 0; // Date.now() when first timings chunk arrives
+let hasGenerationData = false;
+
+export class InferenceStatusManager {
   private servers: Server[];
 
   constructor(servers: Server[]) {
@@ -78,11 +94,34 @@ export class PrefillProgressManager {
     rateHistory.length = 0;
     uiRef = null;
     hasUIRef = false;
+
+    genPredictedN = 0;
+    genPredictedMs = 0;
+    genStartTime = 0;
+    hasGenerationData = false;
   }
 
   // ─── Public hooks for Pi events ──────────────────────────────────────
 
+  /**
+   * Called before each agent run. Also used as fallback for turn_start
+   * to ensure UI ref stays valid across multi-turn agentic loops.
+   */
   onBeforeAgentStart(ctx: { ui?: any; hasUI?: boolean }): void {
+    if (ctx.ui) {
+      uiRef = ctx.ui;
+      hasUIRef = !!ctx.hasUI;
+    }
+  }
+
+  /**
+   * Called at the start of each turn. Refreshes UI ref in case Pi fires
+   * multiple agent runs within an agentic loop (e.g., after tool execution).
+   */
+  onTurnStart(ctx: { ui?: any; hasUI?: boolean }): void {
+    // Always refresh the UI ref when a new turn starts. In agentic loops
+    // (tool calls, multi-step reasoning) Pi may provide a different context,
+    // so we need to stay in sync.
     if (ctx.ui) {
       uiRef = ctx.ui;
       hasUIRef = !!ctx.hasUI;
@@ -122,6 +161,14 @@ export class PrefillProgressManager {
         p.stream_options.include_usage = true;
       }
 
+      // Always request prompt progress and per-token timings.
+      // The event handler (EventManager.onBeforeProviderRequest) sets these too,
+      // but Pi may modify the payload afterwards. This interceptor is the last
+      // line of defence — if either flag is missing, llama.cpp won't emit the
+      // SSE fields we need for prefill bars or generation TPS.
+      p.return_progress = true;
+      p.timings_per_token = true;
+
       const newBody = JSON.stringify(p);
       if (isString) {
         init.body = newBody;
@@ -131,6 +178,22 @@ export class PrefillProgressManager {
     } catch {
       // Ignore parse errors — not a JSON body
     }
+  }
+
+  /**
+   * Resets per-request state so each new provider call starts fresh.
+   */
+  private resetForNewRequest(): void {
+    currentProgress = null;
+    prevProcessed = 0;
+    prevTimeMs = 0;
+    hasReceivedPrefill = false;
+    rateHistory.length = 0;
+
+    genPredictedN = 0;
+    genPredictedMs = 0;
+    genStartTime = 0;
+    hasGenerationData = false;
   }
 
   // ─── SSE stream interception ────────────────────────────────────────
@@ -147,6 +210,7 @@ export class PrefillProgressManager {
 
     return new ReadableStream({
       async start(controller) {
+        self.resetForNewRequest();
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -162,8 +226,17 @@ export class PrefillProgressManager {
 
             try {
               const chunk = JSON.parse(jsonStr);
+
+              // Prompt prefill progress — shown during prompt processing
               if (chunk.prompt_progress) {
                 self.onPromptProgress(chunk.prompt_progress as Record<string, unknown>);
+              }
+
+              // Token-generation timings — shown after prefill completes.
+              // llama.cpp sends this in every chat-completion chunk when
+              // `timings_per_token: true` is set (pi-llama-cpp always does).
+              if (chunk.timings) {
+                self.onTimings(chunk.timings as Record<string, unknown>);
               }
             } catch {
               // Ignore parse errors for non-JSON SSE lines
@@ -194,12 +267,44 @@ export class PrefillProgressManager {
     currentProgress = { total, processed, time_ms: timeMs };
     hasReceivedPrefill = true;
 
-    // Record instantaneous TPS for curve fitting
+    // Record instantaneous TPS for curve fitting.
+    // Require a minimum time delta to avoid bogus values from sub-ms precision
+    // (two chunks sharing the same millisecond timestamp → near-zero denominator).
     const deltaP = (processed ?? 0) - prevProcessed;
     const deltaT = (timeMs ?? 0) - prevTimeMs;
-    if (deltaT > 0 && deltaP > 0) {
-      rateHistory.push({ processed: processed ?? 0, tps: deltaP / (deltaT / 1000) });
-      if (rateHistory.length > MAX_RATE_POINTS) rateHistory.shift();
+    if (deltaT >= MIN_DELTA_MS && deltaP > 0) {
+      const tps = deltaP / (deltaT / 1000);
+      // Sanity cap — discard values that no real GPU could produce.
+      // Catches floating-point edge cases and potential unit-mismatch bugs.
+      if (tps <= MAX_REASONABLE_TPS) {
+        rateHistory.push({ processed: processed ?? 0, tps });
+        if (rateHistory.length > MAX_RATE_POINTS) rateHistory.shift();
+      }
+    }
+
+    this.updateWorkingMessage();
+  }
+
+  /**
+   * Called for every SSE chunk that carries a `timings` object.
+   *
+   * llama.cpp reports cumulative generation stats here:
+   * - predicted_n: total output tokens generated so far
+   * - predicted_ms: wall-clock ms spent generating those tokens
+   */
+  private onTimings(t: Record<string, unknown>): void {
+    const predictedN = t.predicted_n as number | undefined;
+    const predictedMs = t.predicted_ms as number | undefined;
+
+    if (predictedN == null || predictedMs == null) return;
+
+    genPredictedN = predictedN;
+    genPredictedMs = predictedMs;
+
+    // Record start time on first timings chunk
+    if (!hasGenerationData) {
+      genStartTime = Date.now();
+      hasGenerationData = true;
     }
 
     this.updateWorkingMessage();
@@ -219,15 +324,30 @@ export class PrefillProgressManager {
   }
 
   private getProgressMessage(): string | null {
+    // Nothing to show yet — prefill hasn't started and no timings arrived.
+    if (!hasReceivedPrefill && !hasGenerationData) return null;
+
+    // Only switch to generation stats AFTER prefill is complete (processed === total)
+    // or when we have timings but never received any prompt_progress data at all
+    // (some llama.cpp builds may not support it).
+    const prefillComplete =
+      currentProgress?.total != null &&
+      currentProgress.processed !== undefined &&
+      currentProgress.processed >= currentProgress.total;
+
+    if (hasGenerationData && (prefillComplete || !hasReceivedPrefill)) {
+      return this.getStatsMessage();
+    }
+
+    // Still in prefill — show progress bar.
     if (!hasReceivedPrefill) return null;
     if (!currentProgress?.total || currentProgress.processed === undefined) {
       return "Prefilling...";
     }
 
-    // Restore default message when done
+    // Prefill complete — transition to "Generating..." until first timings chunk
     if (currentProgress.total && currentProgress.processed === currentProgress.total) {
-      this.clearWorkingMessage();
-      return null;
+      return hasGenerationData ? this.getStatsMessage() : "Generating...";
     }
 
     const pct = (currentProgress.processed / currentProgress.total) * 100;
@@ -241,14 +361,18 @@ export class PrefillProgressManager {
       const timeMs = currentProgress.time_ms;
       const elapsedSec = timeMs / 1000;
 
-      // Instantaneous TPS from delta
+      // Instantaneous TPS from delta.
+      // Require minimum time delta to avoid bogus values when two chunks
+      // share the same millisecond timestamp (common on fast GPUs).
       const deltaP = processed - prevProcessed;
       const deltaT = timeMs - prevTimeMs;
       let tps: string;
-      if (deltaT > 0 && deltaP > 0) {
+      if (deltaT >= MIN_DELTA_MS && deltaP > 0) {
         tps = `${(deltaP / (deltaT / 1000)).toFixed(1)} tok/s`;
       } else {
-        tps = `${(processed / elapsedSec).toFixed(1)} tok/s`;
+        // Fallback to average TPS. Guard against tiny elapsedSec.
+        const avgTps = elapsedSec >= 0.001 ? processed / elapsedSec : 0;
+        tps = `${Math.min(avgTps, MAX_REASONABLE_TPS).toFixed(1)} tok/s`;
       }
 
       // ETA via rate curve model or fallback to average
@@ -303,6 +427,25 @@ export class PrefillProgressManager {
     const slope = (n * sumXY - sumX * sumY) / denom;
     const intercept = (sumY - slope * sumX) / n;
     return { slope, intercept };
+  }
+
+  /**
+   * Formats the live token-generation status message shown after prefill
+   * completes. Uses server-reported timing data from llama.cpp's `timings`
+   * object — matches upstream UI calculation: (predicted_n / predicted_ms) * 1000.
+   */
+  private getStatsMessage(): string | null {
+    if (!hasGenerationData || genPredictedN === 0) return "Generating...";
+
+    // Use server-side GPU timing, not wall-clock. Wall clock includes network
+    // latency and Pi processing overhead, making TPS appear artificially low.
+    let tps = genPredictedMs > 0 ? (genPredictedN / genPredictedMs) * 1000 : 0;
+    // Sanity cap — catches early-chunk edge cases where predicted_ms rounds
+    // to near-zero on fast GPUs, or unit-mismatch bugs.
+    if (tps > MAX_REASONABLE_TPS || !isFinite(tps)) tps = 0;
+    const elapsedSec = genPredictedMs / 1000;
+
+    return `🤔 ${tps.toFixed(1)} tok/s · ${genPredictedN} tokens in ${elapsedSec.toFixed(1)}s`;
   }
 
   private formatDuration(seconds: number): string {
