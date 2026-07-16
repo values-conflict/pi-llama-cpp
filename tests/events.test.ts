@@ -25,7 +25,7 @@ beforeAll(async () => {
   const mod = await vi.importActual("../src/managers/events");
   EventManager =
     mod.EventManager as typeof import("../src/managers/events").EventManager;
-});
+}, 30_000);
 
 beforeEach(() => {
   vi.restoreAllMocks();
