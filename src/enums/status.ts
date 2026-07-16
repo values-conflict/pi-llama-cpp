@@ -7,3 +7,10 @@ export enum Status {
   UNLOADED = "unloaded",
   UNAUTHORIZED = "unauthorized",
 }
+
+/** Terminal states that end a loading operation */
+export const TERMINAL_STATUSES: Status[] = [
+  Status.LOADED,
+  Status.UNLOADED,
+  Status.FAILED,
+];

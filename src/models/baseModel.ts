@@ -205,7 +205,10 @@ export abstract class BaseModel {
       const { status, exit_code } =
         await this.server.sseManager.subscribeToStatus(this.id);
 
-      if (status === "failed" || (status === "unloaded" && exit_code !== 0)) {
+      if (
+        status === Status.FAILED ||
+        (status === Status.UNLOADED && exit_code !== 0)
+      ) {
         throw new Error(`Model loading failed: ${this.id}`);
       }
     } else {

@@ -87,18 +87,9 @@ export class InferenceStatusManager {
   }
 
   reset(): void {
-    currentProgress = null;
-    prevProcessed = 0;
-    prevTimeMs = 0;
-    hasReceivedPrefill = false;
-    rateHistory.length = 0;
+    this.resetForNewRequest();
     uiRef = null;
     hasUIRef = false;
-
-    genPredictedN = 0;
-    genPredictedMs = 0;
-    genStartTime = 0;
-    hasGenerationData = false;
   }
 
   // ─── Public hooks for Pi events ──────────────────────────────────────
@@ -108,10 +99,7 @@ export class InferenceStatusManager {
    * to ensure UI ref stays valid across multi-turn agentic loops.
    */
   onBeforeAgentStart(ctx: { ui?: any; hasUI?: boolean }): void {
-    if (ctx.ui) {
-      uiRef = ctx.ui;
-      hasUIRef = !!ctx.hasUI;
-    }
+    this.refreshUiRef(ctx);
   }
 
   /**
@@ -122,6 +110,10 @@ export class InferenceStatusManager {
     // Always refresh the UI ref when a new turn starts. In agentic loops
     // (tool calls, multi-step reasoning) Pi may provide a different context,
     // so we need to stay in sync.
+    this.refreshUiRef(ctx);
+  }
+
+  private refreshUiRef(ctx: { ui?: any; hasUI?: boolean }): void {
     if (ctx.ui) {
       uiRef = ctx.ui;
       hasUIRef = !!ctx.hasUI;
@@ -268,18 +260,15 @@ export class InferenceStatusManager {
     hasReceivedPrefill = true;
 
     // Record instantaneous TPS for curve fitting.
-    // Require a minimum time delta to avoid bogus values from sub-ms precision
-    // (two chunks sharing the same millisecond timestamp → near-zero denominator).
-    const deltaP = (processed ?? 0) - prevProcessed;
-    const deltaT = (timeMs ?? 0) - prevTimeMs;
-    if (deltaT >= MIN_DELTA_MS && deltaP > 0) {
-      const tps = deltaP / (deltaT / 1000);
-      // Sanity cap — discard values that no real GPU could produce.
-      // Catches floating-point edge cases and potential unit-mismatch bugs.
-      if (tps <= MAX_REASONABLE_TPS) {
-        rateHistory.push({ processed: processed ?? 0, tps });
-        if (rateHistory.length > MAX_RATE_POINTS) rateHistory.shift();
-      }
+    const instTps = this.computeInstantaneousTps(
+      processed ?? 0,
+      prevProcessed,
+      timeMs ?? 0,
+      prevTimeMs,
+    );
+    if (instTps != null) {
+      rateHistory.push({ processed: processed ?? 0, tps: instTps });
+      if (rateHistory.length > MAX_RATE_POINTS) rateHistory.shift();
     }
 
     this.updateWorkingMessage();
@@ -361,19 +350,17 @@ export class InferenceStatusManager {
       const timeMs = currentProgress.time_ms;
       const elapsedSec = timeMs / 1000;
 
-      // Instantaneous TPS from delta.
-      // Require minimum time delta to avoid bogus values when two chunks
-      // share the same millisecond timestamp (common on fast GPUs).
-      const deltaP = processed - prevProcessed;
-      const deltaT = timeMs - prevTimeMs;
-      let tps: string | null = null;
-      if (deltaT >= MIN_DELTA_MS && deltaP > 0) {
-        const instTps = deltaP / (deltaT / 1000);
-        // Discard bogus spikes — fall through to average, same as tiny-delta case.
-        tps = instTps <= MAX_REASONABLE_TPS ? `${instTps.toFixed(1)} tok/s` : null;
-      }
-
-      if (!tps) {
+      // Instantaneous TPS from delta (falls back to average on bogus spikes).
+      const instTps = this.computeInstantaneousTps(
+        processed,
+        prevProcessed,
+        timeMs,
+        prevTimeMs,
+      );
+      let tps: string;
+      if (instTps != null) {
+        tps = `${instTps.toFixed(1)} tok/s`;
+      } else {
         // Fallback to average TPS. Guard against tiny elapsedSec and cap outliers.
         const avgTps = elapsedSec >= 0.001 ? processed / elapsedSec : 0;
         tps = `${Math.min(avgTps, MAX_REASONABLE_TPS).toFixed(1)} tok/s`;
@@ -389,6 +376,36 @@ export class InferenceStatusManager {
 
   // ─── Rate estimation helpers ────────────────────────────────────────
 
+  /**
+   * Compute instantaneous TPS from two delta measurements.
+   *
+   * Returns null when the time delta is too small (sub-ms precision can produce
+   * bogus spikes) or when no tokens were processed, or when the value exceeds
+   * a sanity cap that catches unit-mismatch bugs and floating-point edge cases.
+   */
+  private computeInstantaneousTps(
+    currentProcessed: number,
+    prevProc: number,
+    currentTimeMs: number,
+    prevTime: number,
+  ): number | null {
+    const deltaP = currentProcessed - prevProc;
+    const deltaT = currentTimeMs - prevTime;
+    if (deltaT < MIN_DELTA_MS || deltaP <= 0) return null;
+
+    const tps = deltaP / (deltaT / 1000);
+    // Sanity cap — discard values that no real GPU could produce.
+    return tps <= MAX_REASONABLE_TPS ? tps : null;
+  }
+
+  /**
+   * Fallback ETA using average TPS from rate history.
+   */
+  private avgEtaFallback(total: number, processed: number): number {
+    const avgTps = rateHistory.reduce((s, p) => s + p.tps, 0) / rateHistory.length;
+    return avgTps > 0 ? (total - processed) / avgTps : 0;
+  }
+
   private estimateEta(processed: number, total: number): number {
     const fit = this.fitRateCurve();
     if (!fit) return 0;
@@ -397,16 +414,14 @@ export class InferenceStatusManager {
 
     // Flat curve — use average TPS
     if (Math.abs(slope) < 0.001) {
-      const avgTps = rateHistory.reduce((s, p) => s + p.tps, 0) / rateHistory.length;
-      return avgTps > 0 ? (total - processed) / avgTps : 0;
+      return this.avgEtaFallback(total, processed);
     }
 
     // Integral of 1/(slope*x+intercept) from processed to total
     const a = slope * total + intercept;
     const b = slope * processed + intercept;
     if (a <= 0 || b <= 0) {
-      const avgTps = rateHistory.reduce((s, p) => s + p.tps, 0) / rateHistory.length;
-      return avgTps > 0 ? (total - processed) / avgTps : 0;
+      return this.avgEtaFallback(total, processed);
     }
 
     if (a / b <= 0) return 0;

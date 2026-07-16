@@ -1,4 +1,5 @@
 import { POLLING_TIMEOUT, SERVER_TIMEOUT } from "../constants";
+import { Status, TERMINAL_STATUSES } from "../enums/status";
 import { SSEClient } from "./client";
 import {
   DownloadProgressData,
@@ -129,11 +130,13 @@ export class SSEManager {
       if (event.event === SSEEventType.status_change && event.data) {
         const data = event.data as unknown as StatusChangeData;
 
-        if (data.status === "loading" && data.progress) {
+        if (data.status === Status.LOADING && data.progress) {
           const progress = data.progress as ProgressData;
           const percentage = Math.round(progress.value * 100);
           onProgress(percentage, progress.current);
-        } else if (data.status === "loaded" || data.status === "failed") {
+        } else if (
+          TERMINAL_STATUSES.includes(data.status as typeof TERMINAL_STATUSES[number])
+        ) {
           // Reset download tracking on final state
           totalDownloaded = 0;
           totalToDownload = 0;
@@ -176,7 +179,7 @@ export class SSEManager {
       this.subscribeToSSE(modelId, (event: SSEEvent) => {
         if (event.event === SSEEventType.status_change && event.data) {
           const data = event.data as unknown as StatusChangeData;
-          if (["loaded", "unloaded", "failed"].includes(data.status)) {
+          if (TERMINAL_STATUSES.includes(data.status as typeof TERMINAL_STATUSES[number])) {
             clearTimeout(timeout);
             resolve(data);
           }

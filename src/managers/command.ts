@@ -268,25 +268,24 @@ export class CommandManager {
    * @returns A mapping of actions for each status
    */
   private async getActionsForModel(model: BaseModel): Promise<Array<Action>> {
-    const allActions: Record<Status, Array<Action>> = {
-      [Status.LOADED]:
-        model.mode === Mode.ROUTER
-          ? [Action.SWITCH, Action.UNLOAD, Action.INFO, Action.CANCEL]
-          : [Action.SWITCH, Action.INFO, Action.CANCEL],
-      [Status.LOADING]: [Action.INFO, Action.CANCEL],
-      [Status.FAILED]: [Action.RETRY, Action.CANCEL],
-      [Status.SLEEPING]: [
-        Action.SWITCH,
-        Action.UNLOAD,
-        Action.INFO,
-        Action.CANCEL,
-      ],
-      [Status.UNLOADED]: [Action.LOAD_AND_SWITCH, Action.LOAD, Action.CANCEL],
-      [Status.UNAUTHORIZED]: [Action.INFO, Action.CANCEL],
+    const baseActions: Array<Action> = [
+      Action.INFO,
+      Action.CANCEL,
+    ];
+
+    const extrasByStatus: Record<Status, Array<Action>> = {
+      [Status.LOADED]: model.mode === Mode.ROUTER
+        ? [Action.SWITCH, Action.UNLOAD]
+        : [Action.SWITCH],
+      [Status.LOADING]: [],
+      [Status.FAILED]: [Action.RETRY],
+      [Status.SLEEPING]: [Action.SWITCH, Action.UNLOAD],
+      [Status.UNLOADED]: [Action.LOAD_AND_SWITCH, Action.LOAD],
+      [Status.UNAUTHORIZED]: [],
     };
 
     const status = await model.getStatus();
-    return allActions[status];
+    return [...baseActions, ...extrasByStatus[status]];
   }
 
   /**
