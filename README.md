@@ -14,6 +14,8 @@ A [Pi Coding Agent](https://pi.dev/) extension that integrates with running [lla
 - **Multiple server support** — connect to multiple llama.cpp servers simultaneously by separating URLs with semicolons
 - **Thinking budget support** — configurable token budgets for model reasoning/thinking, mapped to Pi's thinking levels
 - **Real-time progress tracking** — live loading progress via SSE (falls back to polling)
+- **Inference status display** — prefill progress bar and generation speed shown in Pi's working message during conversations
+- **Generation TPS metrics** — live tokens-per-second, token count, and elapsed time displayed after prompt processing completes
 
 ### Status Indicators
 
@@ -208,6 +210,27 @@ When you trigger a load, switch, or retry action, the extension uses SSE (Server
 If loading takes longer than **60 seconds**, the operation times out with an error.
 
 > **Note:** The timeout only applies to the progress detection. The model might still be loading in the background.
+
+### Inference Status
+
+During a conversation with a llama.cpp model, the extension intercepts server responses to show real-time inference progress in Pi's working message area.
+
+**Prefill phase** — while the model processes your prompt, you'll see a progress bar:
+```
+Prefilling... ████████████░░░░░░░░ 65% · 12s · 48.3 tok/s
+```
+The estimated time remaining is projected from recent throughput samples using a rate curve fit.
+Instantaneous tokens-per-second (tok/s) is shown alongside the percentage complete.
+
+**Generation phase** — after prefill completes, you'll see live generation stats:
+```
+🤔 28.5 tok/s · 142 tokens in 5.0s
+```
+This uses server-side GPU timing from llama.cpp (not wall-clock), so network latency and Pi processing overhead don't affect the displayed speed.
+
+> **Note:** The prefill time-remaining estimate and tok/s calculations are based on the approach from [pi-token-speed](https://pi.dev/packages/pi-token-speed), adapted to use llama.cpp's provided data directly (`prompt_progress` and `timings_per_token`) instead of counting streaming deltas.
+> 
+> **Note:** This feature replaces the standalone [pi-llama-cpp-stats](https://pi.dev/packages/pi-llama-cpp-stats) extension — it is now built-in. If you have both installed, only this one will be active for llama.cpp servers.
 
 ### Model Configuration
 
