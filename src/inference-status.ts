@@ -366,11 +366,15 @@ export class InferenceStatusManager {
       // share the same millisecond timestamp (common on fast GPUs).
       const deltaP = processed - prevProcessed;
       const deltaT = timeMs - prevTimeMs;
-      let tps: string;
+      let tps: string | null = null;
       if (deltaT >= MIN_DELTA_MS && deltaP > 0) {
-        tps = `${(deltaP / (deltaT / 1000)).toFixed(1)} tok/s`;
-      } else {
-        // Fallback to average TPS. Guard against tiny elapsedSec.
+        const instTps = deltaP / (deltaT / 1000);
+        // Discard bogus spikes — fall through to average, same as tiny-delta case.
+        tps = instTps <= MAX_REASONABLE_TPS ? `${instTps.toFixed(1)} tok/s` : null;
+      }
+
+      if (!tps) {
+        // Fallback to average TPS. Guard against tiny elapsedSec and cap outliers.
         const avgTps = elapsedSec >= 0.001 ? processed / elapsedSec : 0;
         tps = `${Math.min(avgTps, MAX_REASONABLE_TPS).toFixed(1)} tok/s`;
       }
@@ -440,9 +444,9 @@ export class InferenceStatusManager {
     // Use server-side GPU timing, not wall-clock. Wall clock includes network
     // latency and Pi processing overhead, making TPS appear artificially low.
     let tps = genPredictedMs > 0 ? (genPredictedN / genPredictedMs) * 1000 : 0;
-    // Sanity cap — catches early-chunk edge cases where predicted_ms rounds
-    // to near-zero on fast GPUs, or unit-mismatch bugs.
-    if (tps > MAX_REASONABLE_TPS || !isFinite(tps)) tps = 0;
+    // Discard bogus spikes from early-chunk edge cases where predicted_ms
+    // rounds to near-zero on fast GPUs, or unit-mismatch bugs.
+    if (tps > MAX_REASONABLE_TPS || !isFinite(tps)) return "Generating...";
     const elapsedSec = genPredictedMs / 1000;
 
     return `🤔 ${tps.toFixed(1)} tok/s · ${genPredictedN} tokens in ${elapsedSec.toFixed(1)}s`;
