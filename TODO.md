@@ -2,7 +2,6 @@
 - progress/status during "compacting context"
 - upstream web UI (has progress bars / live status)? llama.cpp/tools/ui/src/lib/stores/chat.svelte.ts
 
-- unit test failure? (`events.test.ts`, apparently)
 - new unit tests to add?
 
 - `/models` vs `/model` - what's up with that?  is that really worthwhile?  (I never load/unload models explicitly, only implicitly)

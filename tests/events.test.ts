@@ -233,7 +233,10 @@ describe("EventManager.onBeforeProviderRequest", () => {
         event as any,
       )) as Record<string, unknown>;
 
-      expect(result).toEqual(createPayload("model-a"));
+      expect(result.model).toBe("model-a");
+      expect(result.messages).toEqual(createPayload("model-a").messages);
+      expect(result.return_progress).toBe(true);
+      expect(result.timings_per_token).toBe(true);
       expect(result).not.toHaveProperty("thinking_budget_tokens");
     });
 
