@@ -2,8 +2,6 @@
 - progress/status during "compacting context"
 - upstream web UI (has progress bars / live status)? llama.cpp/tools/ui/src/lib/stores/chat.svelte.ts
 
-- new unit tests to add?
-
 - `/models` vs `/model` - what's up with that?  is that really worthwhile?  (I never load/unload models explicitly, only implicitly)
 
 - can we safely detect when our prompt is "in queue" and present "Waiting" instead of the default "Working" ?  does llama.cpp report any kind of queue position information?
