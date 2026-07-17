@@ -11,12 +11,24 @@ import type { Server } from "./server";
 
 // ─── State ──────────────────────────────────────────────────────────────
 
-let currentProgress: { total?: number; processed?: number; time_ms?: number } | null = null;
+let currentProgress: { total?: number; processed?: number; time_ms?: number; cache?: number } | null = null;
 let prevProcessed = 0;
 let prevTimeMs = 0;
 let hasReceivedPrefill = false;
 let uiRef: any = null;
 let hasUIRef = false;
+
+// Status bar key — shown in Pi's footer alongside other extensions (e.g. pi-token-speed)
+const STATUS_KEY = "pi-llama-cpp";
+
+// Frozen prefill snapshot captured when prefill completes.
+// Used for the status bar so fixed values persist across generation/turn-end phases.
+let prefillSnapshot: {
+  totalTokens: number;
+  cachedTokens: number;
+  newTokens: number;
+  elapsedMs: number;
+} | null = null;
 
 // Track instantaneous TPS measurements for rate curve fitting (prefill)
 const rateHistory: { processed: number; tps: number }[] = [];
@@ -36,8 +48,10 @@ let originalFetch: typeof fetch | null = null;
 // Generation-phase state — populated from `timings` in each SSE chunk
 let genPredictedN = 0;
 let genPredictedMs = 0;
+let genCacheTokens = 0; // total cached tokens (from timings.cache_n)
 let genStartTime = 0; // Date.now() when first timings chunk arrives
 let hasGenerationData = false;
+let genComplete = false; // set true on turn end — gates Gen stats in status bar
 
 export class InferenceStatusManager {
   private servers: Server[];
@@ -87,6 +101,9 @@ export class InferenceStatusManager {
   }
 
   reset(): void {
+    // Clear display before wiping state (uiRef is still valid here).
+    this.clearAllDisplay();
+
     this.resetForNewRequest();
     uiRef = null;
     hasUIRef = false;
@@ -120,8 +137,15 @@ export class InferenceStatusManager {
     }
   }
 
-  onTurnEnd(ctx: { ui?: any; hasUI?: boolean }): void {
-    this.clearWorkingMessage();
+  onTurnEnd(_ctx: { ui?: any; hasUI?: boolean }): void {
+    // Mark generation as complete so status bar shows both prefill + gen together.
+    if (hasGenerationData && genPredictedN > 0) {
+      genComplete = true;
+      this.updateStatusBar();
+    }
+
+    // Clear working message — status bar persists until next turn start / reset.
+    try { uiRef?.setWorkingMessage(); } catch {}
   }
 
   private clearWorkingMessage(): void {
@@ -184,8 +208,12 @@ export class InferenceStatusManager {
 
     genPredictedN = 0;
     genPredictedMs = 0;
+    genCacheTokens = 0;
     genStartTime = 0;
     hasGenerationData = false;
+    genComplete = false;
+
+    prefillSnapshot = null;
   }
 
   // ─── SSE stream interception ────────────────────────────────────────
@@ -249,6 +277,7 @@ export class InferenceStatusManager {
     const total = p.total as number | undefined;
     const processed = p.processed as number | undefined;
     const timeMs = p.time_ms as number | undefined;
+    const cache = (p.cache as number) ?? 0;
 
     // Save previous values for delta TPS calculation
     if (currentProgress) {
@@ -256,7 +285,7 @@ export class InferenceStatusManager {
       prevTimeMs = currentProgress.time_ms ?? 0;
     }
 
-    currentProgress = { total, processed, time_ms: timeMs };
+    currentProgress = { total, processed, time_ms: timeMs, cache };
     hasReceivedPrefill = true;
 
     // Record instantaneous TPS for curve fitting.
@@ -269,6 +298,19 @@ export class InferenceStatusManager {
     if (instTps != null) {
       rateHistory.push({ processed: processed ?? 0, tps: instTps });
       if (rateHistory.length > MAX_RATE_POINTS) rateHistory.shift();
+    }
+
+    // Capture frozen prefill snapshot when prefill completes.
+    const isPrefillComplete = total != null && processed !== undefined && processed >= total;
+    if (isPrefillComplete && !prefillSnapshot) {
+      const cacheCount = currentProgress.cache ?? 0;
+      prefillSnapshot = {
+        totalTokens: total,
+        cachedTokens: cacheCount,
+        newTokens: Math.max(processed - cacheCount, 0),
+        elapsedMs: timeMs ?? 0,
+      };
+      this.updateStatusBar(); // show final prefill stats in status bar
     }
 
     this.updateWorkingMessage();
@@ -289,6 +331,11 @@ export class InferenceStatusManager {
 
     genPredictedN = predictedN;
     genPredictedMs = predictedMs;
+    // cache_n is the total cached tokens for this request. Capture it from timings.
+    const cacheN = t.cache_n as number | undefined;
+    if (cacheN != null) {
+      genCacheTokens = cacheN;
+    }
 
     // Record start time on first timings chunk
     if (!hasGenerationData) {
@@ -339,7 +386,11 @@ export class InferenceStatusManager {
       return hasGenerationData ? this.getStatsMessage() : "Generating...";
     }
 
-    const pct = (currentProgress.processed / currentProgress.total) * 100;
+    // Adjust progress to reflect actual work (not cached tokens), matching upstream.
+    const cacheCount = currentProgress.cache ?? 0;
+    const actualTotal = Math.max(currentProgress.total! - cacheCount, 1);
+    const actualDone = Math.max((currentProgress.processed ?? 0) - cacheCount, 0);
+    const pct = (actualDone / actualTotal) * 100;
     const filled = Math.round((pct / 100) * 20);
     const bar = "█".repeat(filled) + "░".repeat(20 - filled);
 
@@ -367,8 +418,17 @@ export class InferenceStatusManager {
       }
 
       // ETA via rate curve model or fallback to average
-      const etaSec = this.estimateEta(processed, total);
+      // Based on actual remaining work (total - cache), not raw token count.
+      const etaSec = this.estimateEta(processed, currentProgress.total!);
+
       suffix = `${this.formatDuration(etaSec)} · ${tps}`;
+    }
+
+    // Append cache info when there are hits.
+    let cacheSuffix = "";
+    if (cacheCount > 0) {
+      const newTokens = Math.max((currentProgress.processed ?? 0) - cacheCount, 0);
+      suffix += ` · ${cacheCount} cached / ${newTokens} new`;
     }
 
     return `Prefilling... ${bar} ${pct.toFixed(0).padStart(3)}%${suffix ? ` · ${suffix}` : ""}`;
@@ -398,30 +458,36 @@ export class InferenceStatusManager {
     return tps <= MAX_REASONABLE_TPS ? tps : null;
   }
 
-  /**
-   * Fallback ETA using average TPS from rate history.
-   */
-  private avgEtaFallback(total: number, processed: number): number {
-    const avgTps = rateHistory.reduce((s, p) => s + p.tps, 0) / rateHistory.length;
-    return avgTps > 0 ? (total - processed) / avgTps : 0;
-  }
+
 
   private estimateEta(processed: number, total: number): number {
+    // ETA should be based on actual remaining work (total - cache), not raw token count.
+    const cacheCount = currentProgress?.cache ?? 0;
+    const effectiveTotal = Math.max(total - cacheCount, processed);
+
+    if (processed >= effectiveTotal) return 0;
+
     const fit = this.fitRateCurve();
-    if (!fit) return 0;
+    if (!fit) {
+      // Fallback: use average TPS over actual work.
+      const avgTps = rateHistory.reduce((s, p) => s + p.tps, 0) / rateHistory.length;
+      return avgTps > 0 ? (effectiveTotal - processed) / avgTps : 0;
+    }
 
     const { slope, intercept } = fit;
 
-    // Flat curve — use average TPS
+    // Flat curve — use average TPS over actual work.
     if (Math.abs(slope) < 0.001) {
-      return this.avgEtaFallback(total, processed);
+      const avgTps = rateHistory.reduce((s, p) => s + p.tps, 0) / rateHistory.length;
+      return avgTps > 0 ? (effectiveTotal - processed) / avgTps : 0;
     }
 
-    // Integral of 1/(slope*x+intercept) from processed to total
-    const a = slope * total + intercept;
+    // Integral of 1/(slope*x+intercept) from processed to effectiveTotal
+    const a = slope * effectiveTotal + intercept;
     const b = slope * processed + intercept;
     if (a <= 0 || b <= 0) {
-      return this.avgEtaFallback(total, processed);
+      const avgTps = rateHistory.reduce((s, p) => s + p.tps, 0) / rateHistory.length;
+      return avgTps > 0 ? (effectiveTotal - processed) / avgTps : 0;
     }
 
     if (a / b <= 0) return 0;
@@ -472,5 +538,58 @@ export class InferenceStatusManager {
     const m = Math.floor(seconds / 60);
     const s = Math.round(seconds % 60);
     return `${m}m ${s}s`;
+  }
+
+  // ─── Status bar display (fixed values, not live-updating) ─────────────
+  // All status-bar format strings live here alongside working-message formatters
+  // so layout/tweaks can be made in one place.
+
+  /**
+   * Writes the status bar line via ctx.ui.setStatus().
+   *
+   * Phases:
+   * - Generation active: shows final prefill stats only.
+   * - Turn end (complete): shows both prefill + generation stats together.
+   */
+  private updateStatusBar(): void {
+    if (!uiRef || !hasUIRef) return;
+
+    const parts: string[] = [];
+
+    // Prefill snapshot — shown as soon as it is captured, persists through gen phase.
+    if (prefillSnapshot) {
+      const { totalTokens, cachedTokens, newTokens, elapsedMs } = prefillSnapshot;
+      const tps = elapsedMs > 0 ? ((totalTokens - cachedTokens) / elapsedMs) * 1000 : 0;
+      parts.push(
+        `Prefill: ${totalTokens} tok${cachedTokens > 0 ? `, ${cachedTokens} cached, ${newTokens} new` : ""}, ${(elapsedMs / 1000).toFixed(1)}s @ ${tps.toFixed(1)} tok/s`,
+      );
+    }
+
+    // Generation stats — shown only after generation is complete (genComplete flag).
+    if (genComplete && hasGenerationData && genPredictedN > 0) {
+      const tps = genPredictedMs > 0 ? (genPredictedN / genPredictedMs) * 1000 : 0;
+      if (tps <= MAX_REASONABLE_TPS && isFinite(tps)) {
+        parts.push(
+          `Gen: ${genPredictedN} tokens in ${(genPredictedMs / 1000).toFixed(1)}s @ ${tps.toFixed(1)} tok/s`,
+        );
+      }
+    }
+
+    const text = parts.length > 0 ? parts.join(" · ") : undefined;
+    try {
+      uiRef.setStatus(STATUS_KEY, text);
+    } catch {
+      // UI may not be available in all contexts
+    }
+  }
+
+  /**
+   * Clears both the working message and status bar. Called on reset / turn start.
+   */
+  private clearAllDisplay(): void {
+    if (uiRef && hasUIRef) {
+      try { uiRef.setWorkingMessage(); } catch {}
+      try { uiRef.setStatus(STATUS_KEY, undefined); } catch {}
+    }
   }
 }
