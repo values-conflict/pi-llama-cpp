@@ -8,12 +8,9 @@ import type {
 	RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { stream, streamSimple } from "@earendil-works/pi-ai/compat";
+import { LlamaClient, type LlamaModelInfo, llamaInferenceUrl, normalizeLlamaServerUrl } from "./client.ts";
 
-// DEVIATION FROM UPSTREAM: import without .ts extension (our bundler resolves it)
-import { LlamaClient, type LlamaModelInfo, llamaInferenceUrl, normalizeLlamaServerUrl } from "./client";
-
-// DEVIATION FROM UPSTREAM: ID is "llallma.cpp" for backwards compatibility with existing stored credentials.
-export const LLAMA_PROVIDER_ID = "llallma.cpp";
+export const LLAMA_PROVIDER_ID = "llama.cpp";
 export const DEFAULT_LLAMA_SERVER_URL = "http://127.0.0.1:8080";
 const DEFAULT_MAX_TOKENS = 16384;
 
@@ -60,35 +57,24 @@ export interface LlamaProviderController {
 	setCatalog(models: readonly LlamaModelInfo[], serverUrl: string): void;
 }
 
-/**
- * Creates the llama.cpp dynamic provider.
- *
- * Deviations from upstream (src/upstream/provider.ts), marked with "DEVIATION FROM UPSTREAM" comments:
- * - Provider ID is "llallma.cpp" for backwards compatibility
- * - Display names include "(all available models)" to distinguish from Pi's built-in provider
- * - setCatalog shows ALL models, not just loaded ones (leverages llama.cpp auto-loading)
- */
 export function createLlamaProvider(): LlamaProviderController {
 	let models: readonly Model<"openai-completions">[] = [];
 
-	// DEVIATION FROM UPSTREAM: show ALL models (not just loaded ones). llama.cpp auto-loads on first request, so users can freely pick any available model and it loads automatically.
 	const setCatalog = (catalog: readonly LlamaModelInfo[], serverUrl: string): void => {
-		models = catalog.map((model) => toPiModel(model, serverUrl));
+		models = catalog.filter((model) => model.status.value === "loaded").map((model) => toPiModel(model, serverUrl));
 	};
 
 	const provider: Provider<"openai-completions"> = {
 		id: LLAMA_PROVIDER_ID,
-		// DEVIATION FROM UPSTREAM: display name distinguishes our extension from Pi's built-in provider.
-		name: "llama.cpp (all available models)",
+		name: "llama.cpp",
 		baseUrl: llamaInferenceUrl(DEFAULT_LLAMA_SERVER_URL),
 		auth: {
 			apiKey: {
-				// DEVIATION FROM UPSTREAM: display name distinguishes our extension from Pi's built-in provider.
-				name: "llama.cpp (all available models) server",
+				name: "llama.cpp server",
 				login: async (interaction): Promise<ApiKeyCredential> => {
 					const enteredUrl = await interaction.prompt({
 						type: "text",
-						message: "llama.cpp (all available models) server URL",
+						message: "llama.cpp server URL",
 						placeholder: process.env.LLAMA_BASE_URL ?? DEFAULT_LLAMA_SERVER_URL,
 					});
 					const serverUrl = normalizeLlamaServerUrl(
