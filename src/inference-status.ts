@@ -1,13 +1,7 @@
 /**
  * InferenceStatusManager — intercepts llama.cpp SSE responses to show prompt
  * processing progress and live token-generation stats in Pi's working message.
- *
- * Unlike the standalone pi-llama-cpp-stats extension, this uses known server
- * baseUrls from the Server instances so URL matching is exact (no guessing).
  */
-
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Server } from "./server";
 
 // ─── State ──────────────────────────────────────────────────────────────
 
@@ -35,12 +29,9 @@ const rateHistory: { processed: number; tps: number }[] = [];
 const MAX_RATE_POINTS = 20;
 
 // Minimum meaningful time delta (ms) to avoid bogus TPS from sub-ms precision.
-// Two SSE chunks can share the same millisecond timestamp on fast GPUs,
-// producing deltaT ≈ 0 and TPS in the hundreds of thousands.
 const MIN_DELTA_MS = 1;
 
 // Sanity cap for displayed TPS — no consumer GPU hits this during inference.
-// Catches unit-mismatch bugs (us vs ms) or floating-point edge cases.
 const MAX_REASONABLE_TPS = 50_000;
 
 let originalFetch: typeof fetch | null = null;
@@ -49,23 +40,22 @@ let originalFetch: typeof fetch | null = null;
 let genPredictedN = 0;
 let genPredictedMs = 0;
 let genCacheTokens = 0; // total cached tokens (from timings.cache_n)
-let genStartTime = 0; // Date.now() when first timings chunk arrives
 let hasGenerationData = false;
 let genComplete = false; // set true on turn end — gates Gen stats in status bar
 
+// Server URLs to match against for the fetch interceptor.
+// Populated from auth credentials at install time, refreshed dynamically.
+const serverUrls: string[] = [];
+
 export class InferenceStatusManager {
-  private servers: Server[];
-
-  constructor(servers: Server[]) {
-    this.servers = servers;
-  }
-
   /**
    * Install the global fetch interceptor. Call once at extension init.
    */
-  install(): void {
+  install(serverUrl?: string): void {
     if (originalFetch) return; // already installed
     originalFetch = globalThis.fetch;
+
+    if (serverUrl) serverUrls.push(normalizeBaseUrl(serverUrl));
 
     const self = this;
     globalThis.fetch = async (input: any, init?: any) => {
@@ -109,6 +99,16 @@ export class InferenceStatusManager {
     hasUIRef = false;
   }
 
+  /**
+   * Update the tracked server URLs. Called when auth credentials change.
+   */
+  updateServerUrl(serverUrl: string): void {
+    const normalized = normalizeBaseUrl(serverUrl);
+    if (!serverUrls.includes(normalized)) {
+      serverUrls.push(normalized);
+    }
+  }
+
   // ─── Public hooks for Pi events ──────────────────────────────────────
 
   /**
@@ -124,9 +124,6 @@ export class InferenceStatusManager {
    * multiple agent runs within an agentic loop (e.g., after tool execution).
    */
   onTurnStart(ctx: { ui?: any; hasUI?: boolean }): void {
-    // Always refresh the UI ref when a new turn starts. In agentic loops
-    // (tool calls, multi-step reasoning) Pi may provide a different context,
-    // so we need to stay in sync.
     this.refreshUiRef(ctx);
   }
 
@@ -157,7 +154,7 @@ export class InferenceStatusManager {
   // ─── URL matching ────────────────────────────────────────────────────
 
   private isLlamaCppUrl(url: string): boolean {
-    return this.servers.some((s) => url.startsWith(s.baseUrl));
+    return serverUrls.some((s) => url.startsWith(s));
   }
 
   // ─── Request body modification ───────────────────────────────────────
@@ -178,10 +175,6 @@ export class InferenceStatusManager {
       }
 
       // Always request prompt progress and per-token timings.
-      // The event handler (EventManager.onBeforeProviderRequest) sets these too,
-      // but Pi may modify the payload afterwards. This interceptor is the last
-      // line of defence — if either flag is missing, llama.cpp won't emit the
-      // SSE fields we need for prefill bars or generation TPS.
       p.return_progress = true;
       p.timings_per_token = true;
 
@@ -209,7 +202,6 @@ export class InferenceStatusManager {
     genPredictedN = 0;
     genPredictedMs = 0;
     genCacheTokens = 0;
-    genStartTime = 0;
     hasGenerationData = false;
     genComplete = false;
 
@@ -253,8 +245,6 @@ export class InferenceStatusManager {
               }
 
               // Token-generation timings — shown after prefill completes.
-              // llama.cpp sends this in every chat-completion chunk when
-              // `timings_per_token: true` is set (pi-llama-cpp always does).
               if (chunk.timings) {
                 self.onTimings(chunk.timings as Record<string, unknown>);
               }
@@ -318,10 +308,6 @@ export class InferenceStatusManager {
 
   /**
    * Called for every SSE chunk that carries a `timings` object.
-   *
-   * llama.cpp reports cumulative generation stats here:
-   * - predicted_n: total output tokens generated so far
-   * - predicted_ms: wall-clock ms spent generating those tokens
    */
   private onTimings(t: Record<string, unknown>): void {
     const predictedN = t.predicted_n as number | undefined;
@@ -339,7 +325,6 @@ export class InferenceStatusManager {
 
     // Record start time on first timings chunk
     if (!hasGenerationData) {
-      genStartTime = Date.now();
       hasGenerationData = true;
     }
 
@@ -364,8 +349,6 @@ export class InferenceStatusManager {
     if (!hasReceivedPrefill && !hasGenerationData) return null;
 
     // Only switch to generation stats AFTER prefill is complete (processed === total)
-    // or when we have timings but never received any prompt_progress data at all
-    // (some llama.cpp builds may not support it).
     const prefillComplete =
       currentProgress?.total != null &&
       currentProgress.processed !== undefined &&
@@ -397,7 +380,6 @@ export class InferenceStatusManager {
     let suffix = "";
     if (currentProgress.time_ms && currentProgress.processed > 0) {
       const processed = currentProgress.processed;
-      const total = currentProgress.total!;
       const timeMs = currentProgress.time_ms;
       const elapsedSec = timeMs / 1000;
 
@@ -418,7 +400,6 @@ export class InferenceStatusManager {
       }
 
       // ETA via rate curve model or fallback to average
-      // Based on actual remaining work (total - cache), not raw token count.
       const etaSec = this.estimateEta(processed, currentProgress.total!);
 
       suffix = `${this.formatDuration(etaSec)} · ${tps}`;
@@ -438,10 +419,6 @@ export class InferenceStatusManager {
 
   /**
    * Compute instantaneous TPS from two delta measurements.
-   *
-   * Returns null when the time delta is too small (sub-ms precision can produce
-   * bogus spikes) or when no tokens were processed, or when the value exceeds
-   * a sanity cap that catches unit-mismatch bugs and floating-point edge cases.
    */
   private computeInstantaneousTps(
     currentProcessed: number,
@@ -458,10 +435,7 @@ export class InferenceStatusManager {
     return tps <= MAX_REASONABLE_TPS ? tps : null;
   }
 
-
-
   private estimateEta(processed: number, total: number): number {
-    // ETA should be based on actual remaining work (total - cache), not raw token count.
     const cacheCount = currentProgress?.cache ?? 0;
     const effectiveTotal = Math.max(total - cacheCount, processed);
 
@@ -515,18 +489,14 @@ export class InferenceStatusManager {
   }
 
   /**
-   * Formats the live token-generation status message shown after prefill
-   * completes. Uses server-reported timing data from llama.cpp's `timings`
-   * object — matches upstream UI calculation: (predicted_n / predicted_ms) * 1000.
+   * Formats the live token-generation status message shown after prefill completes.
    */
   private getStatsMessage(): string | null {
     if (!hasGenerationData || genPredictedN === 0) return "Generating...";
 
-    // Use server-side GPU timing, not wall-clock. Wall clock includes network
-    // latency and Pi processing overhead, making TPS appear artificially low.
+    // Use server-side GPU timing, not wall-clock.
     let tps = genPredictedMs > 0 ? (genPredictedN / genPredictedMs) * 1000 : 0;
-    // Discard bogus spikes from early-chunk edge cases where predicted_ms
-    // rounds to near-zero on fast GPUs, or unit-mismatch bugs.
+    // Discard bogus spikes from early-chunk edge cases where predicted_ms rounds to near-zero.
     if (tps > MAX_REASONABLE_TPS || !isFinite(tps)) return "Generating...";
     const elapsedSec = genPredictedMs / 1000;
 
@@ -540,16 +510,10 @@ export class InferenceStatusManager {
     return `${m}m ${s}s`;
   }
 
-  // ─── Status bar display (fixed values, not live-updating) ─────────────
-  // All status-bar format strings live here alongside working-message formatters
-  // so layout/tweaks can be made in one place.
+  // ─── Status bar display (fixed values, not live-updating) ──────────────
 
   /**
    * Writes the status bar line via ctx.ui.setStatus().
-   *
-   * Phases:
-   * - Generation active: shows final prefill stats only.
-   * - Turn end (complete): shows both prefill + generation stats together.
    */
   private updateStatusBar(): void {
     if (!uiRef || !hasUIRef) return;
@@ -592,4 +556,9 @@ export class InferenceStatusManager {
       try { uiRef.setStatus(STATUS_KEY, undefined); } catch {}
     }
   }
+}
+
+/** Normalize a server URL for matching: strip trailing slashes and /v1 suffix. */
+function normalizeBaseUrl(url: string): string {
+  return url.replace(/\/+$/, "").replace(/\/v1$/, "");
 }

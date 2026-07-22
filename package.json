@@ -1,7 +1,7 @@
 {
   "name": "pi-llama-cpp",
-  "version": "0.9.1",
-  "description": "Pi extension for llama.cpp integration. Supports router, single and legacy models. Supports multiple servers.",
+  "version": "1.0.0",
+  "description": "Pi extension for llama.cpp integration. Dynamic provider with inference status tracking and thinking budget support.",
   "keywords": [
     "pi",
     "pi-package",
@@ -23,22 +23,9 @@
       "./src/index.ts"
     ]
   },
-  "scripts": {
-    "test": "vitest run"
-  },
-  "prettier": {
-    "plugins": [
-      "prettier-plugin-organize-imports"
-    ]
-  },
+  "scripts": {},
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
-  },
-  "devDependencies": {
-    "@types/node": "^26.1.1",
-    "prettier-plugin-organize-imports": "^4.3.0",
-    "vitest": "^4.1.10"
+    "@earendil-works/pi-coding-agent": "*"
   }
 }

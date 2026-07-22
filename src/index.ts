@@ -1,85 +1,182 @@
-import {
-  type BeforeProviderRequestEvent,
-  type ExtensionAPI,
-  type ExtensionCommandContext,
-  type ExtensionContext,
-  type SessionBeforeSwitchEvent,
-  type SessionStartEvent,
-} from "@earendil-works/pi-coding-agent";
-import { PROVIDER_NAME } from "./constants";
-import { ModelSelectEvent } from "./interfaces/events";
-import { CommandManager } from "./managers/command";
-import { EventManager } from "./managers/events";
-import { ServerManager } from "./managers/server";
+import { readStoredCredential } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { InferenceStatusManager } from "./inference-status";
-import { ConfigResolver } from "./resolver";
-import { Server } from "./server";
+import { LLAMA_PROVIDER_ID, createLlamaProvider } from "./provider";
+
+/** Normalize a server URL: strip trailing slashes and /v1. */
+function normalizeBaseUrl(url: string): string {
+  try {
+    const u = new URL(url.trim());
+    u.pathname = u.pathname.replace(/\/+$/, "").replace(/\/v1$/, "") || "/";
+    return u.toString().replace(/\/$/, "");
+  } catch {
+    return url;
+  }
+}
+
+/** Resolve server URL from stored credential or env vars (no modelRegistry needed). */
+function resolveServerUrl(): string | undefined {
+  const cred = readStoredCredential(LLAMA_PROVIDER_ID);
+  if (cred && typeof cred === "object") {
+    const envVal = (cred as any).env?.LLAMA_BASE_URL;
+    if (typeof envVal === "string" && envVal.trim()) return normalizeBaseUrl(envVal);
+  }
+  const raw = process.env.LLAMA_BASE_URL?.trim();
+  if (!raw) return undefined;
+  try { return normalizeBaseUrl(raw); } catch { return undefined; }
+}
+
+/** Resolve API key from stored credential or env vars (no modelRegistry needed). */
+function resolveApiKey(): string | undefined {
+  const cred = readStoredCredential(LLAMA_PROVIDER_ID);
+  if (cred && typeof cred === "object") {
+    const key = (cred as any).key;
+    if (typeof key === "string" && key.trim()) return key;
+  }
+  return process.env.LLAMA_API_KEY || undefined;
+}
 
 export default async function (pi: ExtensionAPI) {
-  const resolver = new ConfigResolver();
-  const urls = await resolver.resolveUrls();
-  const servers = urls.map((url) => new Server(url));
+  const controller = createLlamaProvider();
 
-  const eventManager = new EventManager(servers);
-  const serverManager = new ServerManager(servers);
-  const commandManager = new CommandManager(serverManager);
-  const inferenceStatus = new InferenceStatusManager(servers);
+  // Register the dynamic provider with Pi
+  pi.registerProvider(controller.provider);
 
-  // Install fetch interceptor for inference status tracking
-  inferenceStatus.install();
+  /** Resolve server URL from auth credentials via modelRegistry. */
+  async function resolveServerUrlFromAuth(): Promise<string | undefined> {
+    if (!pi.modelRegistry) return undefined;
+    const result = await pi.modelRegistry.getProviderAuth(LLAMA_PROVIDER_ID);
+    if (!result) return undefined;
 
-  // Register providers once at startup
-  await serverManager.initialize(pi);
+    const envUrl = result.env?.LLAMA_BASE_URL as string | undefined;
+    if (typeof envUrl === "string" && envUrl.trim()) {
+      return normalizeBaseUrl(envUrl);
+    }
+    const baseUrl = result.auth?.baseUrl as string | undefined;
+    if (typeof baseUrl === "string") {
+      return normalizeBaseUrl(baseUrl.replace(/\/v1$/, ""));
+    }
+    return undefined;
+  }
 
-  // Single global /models command
-  pi.registerCommand("models", {
-    description: `Browse ${PROVIDER_NAME} models`,
-    getArgumentCompletions: commandManager.getArgumentCompletions,
-    handler: async (args: string, ctx: ExtensionCommandContext) => {
-      await commandManager.handleCommand(args, ctx, pi);
-    },
+  /** Refresh catalog from the live server and update Pi's model registry. */
+  async function refreshCatalog(): Promise<void> {
+    if (!pi.modelRegistry) return;
+    try {
+      const result = await pi.modelRegistry.getProviderAuth(LLAMA_PROVIDER_ID);
+      if (!result) return;
+
+      const envUrl = result.env?.LLAMA_BASE_URL as string | undefined;
+      const serverUrl = typeof envUrl === "string" && envUrl.trim() ? normalizeBaseUrl(envUrl) : undefined;
+      if (!serverUrl) return;
+
+      inferenceStatus.updateServerUrl(serverUrl);
+
+      const { LlamaClient } = await import("./client");
+      const client = new LlamaClient(
+        serverUrl,
+        result.auth?.apiKey as string | undefined,
+      );
+      const catalog = await client.list();
+      controller.setCatalog(catalog, serverUrl);
+    } catch {
+      // Catalog refresh failed — models stay at last known state.
+    }
+  }
+
+  /** Thinking budget injection for before_provider_request events. */
+  async function injectThinkingBudget(event: any): Promise<void> {
+    const payload = event.payload as { model?: string };
+    if (!payload?.model) return;
+
+    if (!pi.modelRegistry) return;
+    const authResult = await pi.modelRegistry.getProviderAuth(LLAMA_PROVIDER_ID);
+    if (!authResult) return;
+
+    const envUrl = authResult.env?.LLAMA_BASE_URL as string | undefined;
+    const serverUrl = typeof envUrl === "string" ? normalizeBaseUrl(envUrl) : "";
+    const inferenceUrl = `${serverUrl}/v1`;
+
+    const models = controller.provider.getModels();
+    const targetModel = models.find((m: any) => m.id === payload.model);
+    if (!targetModel || (targetModel as any).baseUrl !== inferenceUrl && serverUrl !== "") return;
+
+    const { ThinkingBudgetResolver } = await import("./resolver");
+    const resolver = new ThinkingBudgetResolver();
+    const level = resolver.resolveThinkingLevel() ?? "medium";
+    const budgets = resolver.resolveThinkingBudgets();
+    const thinking_budget_tokens = budgets[level];
+
+    payload.return_progress = true as any;
+    payload.timings_per_token = true as any;
+
+    if (level === "off") {
+      payload.chat_template_kwargs = { enable_thinking: false };
+    } else if (level !== "max" && thinking_budget_tokens != null) {
+      payload.thinking_budget_tokens = thinking_budget_tokens;
+    }
+  }
+
+  // ─── Eager catalog refresh at registration time ──────────────
+  // Pi resolves models before session_start fires. We need our catalog populated
+  // by then or it shows "No API key found" / "No models available". Read stored
+  // credential directly from auth.json since modelRegistry isn't ready yet (pre-bindCore).
+
+  const serverUrl = resolveServerUrl();
+  if (serverUrl) {
+    try {
+      const apiKey = resolveApiKey();
+      const { LlamaClient } = await import("./client");
+      const client = new LlamaClient(serverUrl, apiKey);
+      // Use a short timeout so we don't block startup when server is unreachable.
+      const ac = new AbortController();
+      setTimeout(() => ac.abort(), 2000);
+      try {
+        const catalog = await client.list({ signal: ac.signal });
+        controller.setCatalog(catalog, serverUrl);
+      } catch (err) {
+        // Server not reachable — will retry on session_start.
+      }
+    } catch {
+      // Import or other error — will retry on session_start.
+    }
+  }
+
+  let inferenceStatus: InferenceStatusManager;
+  try {
+    inferenceStatus = new InferenceStatusManager(serverUrl || undefined);
+  } catch {
+    inferenceStatus = null as any;
+  }
+
+  // ─── Event handlers ──────────────
+
+  pi.on("before_provider_request", async (event: any) => {
+    await injectThinkingBudget(event);
   });
 
-  // Events
-  pi.on("session_start", (event: SessionStartEvent, ctx: ExtensionContext) => {
+  pi.on("model_select", async (_event: any, _ctx: any) => {
+    await refreshCatalog();
+  });
+
+  pi.on("session_start", (event: any, _ctx: any) => {
     if (event.reason !== "startup") return;
-    for (const warning of serverManager.getWarnings())
-      ctx.ui.notify(warning, "warning");
-
-    for (const warning of resolver.getWarnings())
-      ctx.ui.notify(warning, "warning");
+    void refreshCatalog();
   });
 
-  pi.on("before_agent_start", (_event: unknown, ctx: ExtensionContext) => {
-    inferenceStatus.onBeforeAgentStart(ctx);
+  pi.on("turn_start", (_event: unknown, ctx: any) => {
+    inferenceStatus?.onTurnStart(ctx);
   });
 
-  pi.on("turn_start", (_event: unknown, ctx: ExtensionContext) => {
-    inferenceStatus.onTurnStart(ctx);
+  pi.on("before_agent_start", (_event: unknown, ctx: any) => {
+    inferenceStatus?.onBeforeAgentStart(ctx);
   });
 
-  pi.on(
-    "before_provider_request",
-    async (event: BeforeProviderRequestEvent) =>
-      await eventManager.onBeforeProviderRequest(event),
-  );
-
-  pi.on(
-    "model_select",
-    async (event: ModelSelectEvent, ctx: ExtensionContext) =>
-      await eventManager.onModelSelect(event, ctx),
-  );
-  pi.on(
-    "session_before_switch",
-    async (_: SessionBeforeSwitchEvent, ctx: ExtensionContext) =>
-      await eventManager.onSessionBeforeSwitch(ctx),
-  );
-
-  pi.on("turn_end", (_event: unknown, ctx: ExtensionContext) => {
-    inferenceStatus.onTurnEnd(ctx);
+  pi.on("turn_end", (_event: unknown, _ctx: any) => {
+    inferenceStatus?.onTurnEnd(_ctx as any);
   });
 
   pi.on("session_shutdown", async () => {
-    inferenceStatus.uninstall();
+    inferenceStatus?.uninstall();
   });
 }

@@ -15,6 +15,3 @@
 
 - if I got "18833 cached / 107 new" why was the progress bar down at 9%?
   - another weird example: "0% ·  · 21193 cached / 0 new" (and it sat there for a while thinking about it, but the server logs said our `sim_best` value was actually 0.728 (~73%) -- eventually the UI switched to say "52% · 0s · 45.1 tok/s · 21193 cached / 4096 new" but the server logs say we should be at 87%
-
-- https://github.com/earendil-works/pi/releases/tag/v0.80.8 mentions "live model catalog refresh" -- could we somehow implement that in our plugin so that we hook into the native functionality for model listing?
-- similarly, https://github.com/earendil-works/pi/tree/main/packages/ai#dynamic-providers mentions llama.cpp and dynamic models by name - could we use that instead of the hijacking this plugin does?
