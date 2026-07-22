@@ -144,7 +144,8 @@ export default async function (pi: ExtensionAPI) {
 
   let inferenceStatus: InferenceStatusManager;
   try {
-    inferenceStatus = new InferenceStatusManager(serverUrl || undefined);
+    inferenceStatus = new InferenceStatusManager();
+    inferenceStatus.install(serverUrl);
   } catch {
     inferenceStatus = null as any;
   }
