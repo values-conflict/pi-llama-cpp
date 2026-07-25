@@ -8,15 +8,12 @@ import type {
 	RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { stream, streamSimple } from "@earendil-works/pi-ai/compat";
-
 // DEVIATION FROM UPSTREAM: import without .ts extension (our bundler resolves it)
 import { LlamaClient, type LlamaModelInfo, llamaInferenceUrl, normalizeLlamaServerUrl } from "./client";
 
 // DEVIATION FROM UPSTREAM: ID is "llallma.cpp" for backwards compatibility with existing stored credentials.
 export const LLAMA_PROVIDER_ID = "llallma.cpp";
 export const DEFAULT_LLAMA_SERVER_URL = "http://127.0.0.1:8080";
-const DEFAULT_MAX_TOKENS = 16384;
-
 function credentialServerUrl(credential: ApiKeyCredential | undefined): string | undefined {
 	const value = credential?.env?.LLAMA_BASE_URL;
 	return typeof value === "string" && value.trim() ? normalizeLlamaServerUrl(value) : undefined;
@@ -43,7 +40,7 @@ function toPiModel(model: LlamaModelInfo, serverUrl: string): Model<"openai-comp
 		input: model.architecture?.input_modalities?.includes("image") ? ["text", "image"] : ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow,
-		maxTokens: Math.min(DEFAULT_MAX_TOKENS, contextWindow),
+		maxTokens: contextWindow,
 		compat: {
 			supportsStore: false,
 			supportsDeveloperRole: false,
@@ -127,11 +124,20 @@ export function createLlamaProvider(): LlamaProviderController {
 		},
 		getModels: () => models,
 		refreshModels: async (context: RefreshModelsContext): Promise<void> => {
+			const stored = await context.store.read();
+			if (stored) {
+				models = stored.models.filter(
+					(model): model is Model<"openai-completions"> =>
+						model.provider === LLAMA_PROVIDER_ID && model.api === "openai-completions",
+				);
+			}
+
 			if (!context.allowNetwork || context.signal?.aborted || context.credential?.type !== "api_key") return;
 			const serverUrl = credentialServerUrl(context.credential);
 			if (!serverUrl) return;
 			const catalog = await new LlamaClient(serverUrl, context.credential.key).list({ signal: context.signal });
 			setCatalog(catalog, serverUrl);
+			if (!context.signal?.aborted) await context.store.write({ models, checkedAt: Date.now() });
 		},
 		stream: (model, context, options) => stream(model, context, options as ProviderStreamOptions | undefined),
 		streamSimple: (model, context, options) => streamSimple(model, context, options),
