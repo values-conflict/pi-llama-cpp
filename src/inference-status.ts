@@ -656,9 +656,9 @@ export class InferenceStatusManager {
         if (tps <= MAX_REASONABLE_TPS && isFinite(tps)) {
           const parts: string[] = ["⏳ Waiting..."];
           if (finalPromptTokens && finalPromptMs) {
-            parts.push(`Prompt: ${finalPromptTokens}t / ${this.formatDuration(finalPromptMs / 1000)}`);
+            parts.push(`Prompt: ${finalPromptTokens}t / ${this.formatDuration(finalPromptMs)}`);
           }
-          parts.push(`Gen: ${finalPredictedTokens}t / ${this.formatDuration(finalPredictedMs / 1000)} @ ${tps.toFixed(1)} tok/s`);
+          parts.push(`Gen: ${finalPredictedTokens}t / ${this.formatDuration(finalPredictedMs)} @ ${tps.toFixed(1)} tok/s`);
           return parts.join(" · ");
         }
       }
@@ -726,7 +726,7 @@ export class InferenceStatusManager {
       // ETA via rate curve model or fallback to average
       const etaSec = this.estimateEta(processed, currentProgress.total!);
 
-      suffix = `${this.formatDuration(etaSec)} · ${tps}`;
+      suffix = `${this.formatDuration(etaSec * 1000)} · ${tps}`;
     }
 
     // Append cache info when there are hits.
@@ -831,14 +831,15 @@ export class InferenceStatusManager {
     }
 
     // Use formatDuration for consistent time display.
-    const elapsedStr = this.formatDuration(genPredictedMs / 1000);
+    const elapsedStr = this.formatDuration(genPredictedMs);
     parts.push(`🤔 ${tps.toFixed(1)} tok/s · ${genPredictedN} tokens in ${elapsedStr}`);
 
     return parts.join(" · ");
   }
 
-  private formatDuration(seconds: number): string {
-    if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;
+  private formatDuration(ms: number): string {
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    const seconds = ms / 1000;
     if (seconds < 60) return `${seconds.toFixed(1)}s`;
     const m = Math.floor(seconds / 60);
     const s = Math.round(seconds % 60);
@@ -860,7 +861,7 @@ export class InferenceStatusManager {
       const { totalTokens, cachedTokens, newTokens, elapsedMs } = prefillSnapshot;
       const tps = elapsedMs > 0 ? ((totalTokens - cachedTokens) / elapsedMs) * 1000 : 0;
       parts.push(
-        `Prefill: ${totalTokens} tok${cachedTokens > 0 ? `, ${cachedTokens} cached, ${newTokens} new` : ""}, ${this.formatDuration(elapsedMs / 1000)} @ ${tps.toFixed(1)} tok/s`,
+        `Prefill: ${totalTokens} tok${cachedTokens > 0 ? `, ${cachedTokens} cached, ${newTokens} new` : ""}, ${this.formatDuration(elapsedMs)} @ ${tps.toFixed(1)} tok/s`,
       );
     }
 
@@ -869,7 +870,7 @@ export class InferenceStatusManager {
       const tps = genPredictedMs > 0 ? (genPredictedN / genPredictedMs) * 1000 : 0;
       if (tps <= MAX_REASONABLE_TPS && isFinite(tps)) {
         parts.push(
-          `Gen: ${genPredictedN} tokens in ${this.formatDuration(genPredictedMs / 1000)} @ ${tps.toFixed(1)} tok/s`,
+          `Gen: ${genPredictedN} tokens in ${this.formatDuration(genPredictedMs)} @ ${tps.toFixed(1)} tok/s`,
         );
       }
     }

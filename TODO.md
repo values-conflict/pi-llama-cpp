@@ -16,5 +16,3 @@
 
 - could we draw a cute little "spark line" of the live tok/s rate over time?
   - it's not perfect, but we could just fit the most recent X amount of time over a series of ▁▂▃▄▅▆▇█ scaled to the highest and lowest values
-
-- formatDuration should probably take ms instead of seconds (only one call actually has seconds -- every other call has ms and converts to seconds for the call)
