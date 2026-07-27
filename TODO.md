@@ -1,3 +1,5 @@
+- why do I have to do a full `/reload` for pi to pick up context size changes from the model default vs the loaded model?
+
 - split provider and stats into separate repositories
 
 - model loading progress display
