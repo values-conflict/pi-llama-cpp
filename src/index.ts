@@ -2,7 +2,6 @@ import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { InferenceStatusManager } from "./inference-status";
 import { LLAMA_PROVIDER_ID, createLlamaProvider } from "./provider";
-import { ModelLoadingWatcher } from "./model-loading";
 
 /** Normalize a server URL: strip trailing slashes and /v1. */
 function normalizeBaseUrl(url: string): string {
@@ -72,12 +71,7 @@ export default async function (pi: ExtensionAPI) {
       if (!serverUrl) return;
 
       inferenceStatus.updateServerUrl(serverUrl);
-
-      // Reconnect SSE if server URL changed.
-      modelLoadingWatcher.connect(
-        serverUrl,
-        result.auth?.apiKey as string | undefined,
-      );
+      inferenceStatus.connect(serverUrl, result.auth?.apiKey as string | undefined);
 
       const { LlamaClient } = await import("./client");
       const client = new LlamaClient(
@@ -153,19 +147,11 @@ export default async function (pi: ExtensionAPI) {
   try {
     inferenceStatus = new InferenceStatusManager();
     inferenceStatus.install(serverUrl);
+    if (serverUrl) {
+      inferenceStatus.connect(serverUrl, resolveApiKey());
+    }
   } catch {
     inferenceStatus = null as any;
-  }
-
-  const modelLoadingWatcher = new ModelLoadingWatcher();
-
-  // Connect SSE immediately so we catch all loading events in real-time.
-  if (serverUrl) {
-    try {
-      modelLoadingWatcher.connect(serverUrl, resolveApiKey());
-    } catch (e) {
-      console.log(`[llama-cpp] initial SSE connect failed: ${e}`);
-    }
   }
 
   // ─── Event handlers ──────────────
@@ -175,11 +161,9 @@ export default async function (pi: ExtensionAPI) {
     async (event: { payload?: { model?: string } }, ctx: { ui?: any; hasUI?: boolean }) => {
       const payloadModel = event.payload?.model;
 
-      // Update UI context and start watching the target model.
-      if (payloadModel && ctx.ui) {
-        modelLoadingWatcher.setUiContext(ctx.ui, !!ctx.hasUI);
-        modelLoadingWatcher.watch(payloadModel);
-      }
+      // Update UI context, reset state, and start queue detection.
+      inferenceStatus?.onBeforeProviderRequest(ctx, payloadModel);
+      void inferenceStatus?.checkQueue(payloadModel);
 
       await injectThinkingBudget(event);
     },
@@ -206,16 +190,12 @@ export default async function (pi: ExtensionAPI) {
   pi.on(
     "turn_start",
     (_event: unknown, ctx: { ui?: any; hasUI?: boolean }) => {
-      // Stop loading watch when a turn starts — if we reach here,
-      // the request went through so loading is done.
-      modelLoadingWatcher.stopWatching();
-
       inferenceStatus?.onTurnStart(ctx);
     },
   );
 
   pi.on("before_agent_start", (_event: unknown, ctx: any) => {
-    inferenceStatus?.onBeforeAgentStart(ctx);
+    inferenceStatus?.onTurnStart(ctx);
   });
 
   pi.on("turn_end", (_event: unknown, _ctx: any) => {
@@ -223,7 +203,6 @@ export default async function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    modelLoadingWatcher.disconnect();
     inferenceStatus?.uninstall();
   });
 }
