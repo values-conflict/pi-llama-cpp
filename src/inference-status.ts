@@ -6,11 +6,15 @@
 
 import { LlamaClient, type LlamaModelEvent } from "./client";
 
-export type InferencePhase = 'loading' | 'downloading' | 'queued' | 'prefilling' | 'generating' | 'done';
+export type InferencePhase = 'error' | 'loading' | 'downloading' | 'queued' | 'prefilling' | 'generating' | 'done';
+
+type ConnectionState = 'active' | 'ended-cleanly' | 'ended-abruptly' | 'error';
 
 // ─── State ──────────────────────────────────────────────────────────────
 
 let _phase: InferencePhase | null = null;
+let _connectionState: ConnectionState | null = null;
+let _lastError: string | null = null;
 let _queueTimeout: ReturnType<typeof setTimeout> | null = null;
 let currentProgress: { total?: number; processed?: number; time_ms?: number; cache?: number } | null = null;
 let prevProcessed = 0;
@@ -29,6 +33,13 @@ let prefillSnapshot: {
   newTokens: number;
   elapsedMs: number;
 } | null = null;
+
+// Persisted final stats from the last completed turn (survives reset).
+let finalPromptTokens: number | null = null;
+let finalPromptMs: number | null = null;
+let finalPromptCached: number | null = null;
+let finalPredictedTokens: number | null = null;
+let finalPredictedMs: number | null = null;
 
 // Track instantaneous TPS measurements for rate curve fitting (prefill)
 const rateHistory: { processed: number; tps: number }[] = [];
@@ -49,8 +60,14 @@ let genCacheTokens = 0;
 let hasGenerationData = false;
 let genComplete = false;
 
+// Agentic loop tracking
+let turnCount = 0;
+
 // Server URLs to match against for the fetch interceptor.
 const serverUrls: string[] = [];
+
+// Sampling params captured from request body (deferred display).
+let samplingParams: { temperature?: number; topP?: number } | null = null;
 
 // Loading state tracking
 let loadingModel: string | null = null;
@@ -129,23 +146,30 @@ export class InferenceStatusManager {
         return originalFetch!(input, init);
       }
 
-      self.ensureStreamOptions(input, init);
+      try {
+        self.ensureStreamOptions(input, init);
 
-      const response = await originalFetch!(input, init);
+        const response = await originalFetch!(input, init);
 
-      // Re-assert our working message immediately after the request is sent.
-      // Pi's provider layer often overrides the working message when the fetch starts,
-      // so we need to push our status again to prevent it from falling back to "Working...".
-      self.updateWorkingMessage();
+        // Re-assert our working message immediately after the request is sent.
+        // Pi's provider layer often overrides the working message when the fetch starts,
+        // so we need to push our status again to prevent it from falling back to "Working...".
+        self.updateWorkingMessage();
 
-      if (response.ok && response.body) {
-        return new Response(self.captureTimings(response.body), {
-          status: response.status,
-          statusText: response.statusText,
-          headers: new Headers(response.headers),
-        });
+        if (response.ok && response.body) {
+          return new Response(self.captureTimings(response.body), {
+            status: response.status,
+            statusText: response.statusText,
+            headers: new Headers(response.headers),
+          });
+        }
+        return response;
+      } catch (err) {
+        _lastError = err instanceof Error ? err.message : String(err);
+        _phase = 'error';
+        self.updateWorkingMessage();
+        throw err; // still propagate so Pi handles retry/fallback
       }
-      return response;
     };
   }
 
@@ -253,6 +277,7 @@ export class InferenceStatusManager {
     loadingModel = null;
     loadingProgress = null;
     downloadProgress = null;
+    turnCount = 0;
   }
 
   /**
@@ -356,6 +381,12 @@ export class InferenceStatusManager {
       const isString = typeof body === "string";
       const p = isString ? JSON.parse(body) : { ...body };
 
+      // Capture sampling params for deferred display.
+      samplingParams = {
+        temperature: typeof p.temperature === "number" ? p.temperature : undefined,
+        topP: typeof p.top_p === "number" ? p.top_p : undefined,
+      };
+
       // Ensure stream_options.include_usage for token accounting
       if (!p.stream_options) {
         p.stream_options = { include_usage: true };
@@ -384,6 +415,8 @@ export class InferenceStatusManager {
   public resetForNewRequest(): void {
     if (_queueTimeout) clearTimeout(_queueTimeout);
     _phase = null;
+    _connectionState = null;
+    _lastError = null;
     currentProgress = null;
     prevProcessed = 0;
     prevTimeMs = 0;
@@ -397,6 +430,7 @@ export class InferenceStatusManager {
     genComplete = false;
 
     prefillSnapshot = null;
+    samplingParams = null;
 
     // Fallback: if no SSE data arrives within 2s, assume we are queued or server is slow.
     _queueTimeout = setTimeout(() => {
@@ -415,12 +449,17 @@ export class InferenceStatusManager {
     const reader = body.getReader();
     let buffer = "";
     const decoder = new TextDecoder();
+    let sawDone = false;
 
     // Capture `this` for use inside the stream callback (arrow function)
     const self = this;
 
+    // Increment turn counter for agentic loop tracking.
+    turnCount++;
+
     return new ReadableStream({
       async start(controller) {
+        _connectionState = 'active';
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -432,7 +471,10 @@ export class InferenceStatusManager {
           for (const line of lines) {
             if (!line.startsWith("data: ")) continue;
             const jsonStr = line.slice(6);
-            if (jsonStr === "[DONE]") continue;
+            if (jsonStr === "[DONE]") {
+              sawDone = true;
+              continue;
+            }
 
             try {
               const chunk = JSON.parse(jsonStr);
@@ -457,9 +499,31 @@ export class InferenceStatusManager {
 
           controller.enqueue(value);
         }
+
+        // Stream ended — persist final stats before resetting.
+        if (hasGenerationData && genPredictedN > 0) {
+          finalPredictedTokens = genPredictedN;
+          finalPredictedMs = genPredictedMs;
+        }
+        if (prefillSnapshot) {
+          finalPromptTokens = prefillSnapshot.totalTokens;
+          finalPromptMs = prefillSnapshot.elapsedMs;
+          finalPromptCached = prefillSnapshot.cachedTokens;
+        }
+
         if (_queueTimeout) clearTimeout(_queueTimeout);
+
+        // Determine how the stream ended.
+        if (sawDone) {
+          _connectionState = 'ended-cleanly';
+        } else if (_phase === 'prefilling' || _phase === 'generating') {
+          _connectionState = 'ended-abruptly';
+        } else {
+          _connectionState = 'ended-cleanly';
+        }
+
         _phase = 'done';
-        self.clearWorkingMessage();
+        self.updateWorkingMessage();
         controller.close();
       },
       cancel(reason?: any) {
@@ -559,6 +623,16 @@ export class InferenceStatusManager {
   }
 
   private getProgressMessage(): string | null {
+    // Connection error — naturally cleared by any other phase transition.
+    if (_phase === 'error' && _lastError) {
+      return `❌ Connection error: ${_lastError}`;
+    }
+
+    // Stream ended abruptly warning — only show if we haven't moved to a new phase.
+    if (_connectionState === 'ended-abruptly' && _phase !== 'generating' && _phase !== 'prefilling') {
+      return "⚠ Stream ended unexpectedly — response may be incomplete";
+    }
+
     // Loading / Downloading states (from /models/sse)
     if (_phase === 'loading' && loadingProgress) {
       const { ratio, stage, totalStages } = loadingProgress;
@@ -574,7 +648,22 @@ export class InferenceStatusManager {
     }
 
     // Queued state
-    if (_phase === 'queued') return "⏳ Waiting...";
+    if (_phase === 'queued') {
+      // If we have prior final stats (from a previous turn in an agentic loop),
+      // show them alongside the waiting message.
+      if (finalPredictedTokens && finalPredictedMs) {
+        const tps = finalPredictedMs > 0 ? (finalPredictedTokens / finalPredictedMs) * 1000 : 0;
+        if (tps <= MAX_REASONABLE_TPS && isFinite(tps)) {
+          const parts: string[] = ["⏳ Waiting..."];
+          if (finalPromptTokens && finalPromptMs) {
+            parts.push(`Prompt: ${finalPromptTokens}t / ${this.formatDuration(finalPromptMs / 1000)}`);
+          }
+          parts.push(`Gen: ${finalPredictedTokens}t / ${this.formatDuration(finalPredictedMs / 1000)} @ ${tps.toFixed(1)} tok/s`);
+          return parts.join(" · ");
+        }
+      }
+      return "⏳ Waiting...";
+    }
 
     // If we've started a request but haven't seen prefill/gen yet,
     // show "Waiting..." instead of returning null (which triggers Pi's default "Working...").
@@ -732,13 +821,25 @@ export class InferenceStatusManager {
     let tps = genPredictedMs > 0 ? (genPredictedN / genPredictedMs) * 1000 : 0;
     // Discard bogus spikes from early-chunk edge cases where predicted_ms rounds to near-zero.
     if (tps > MAX_REASONABLE_TPS || !isFinite(tps)) return "Generating...";
-    const elapsedSec = genPredictedMs / 1000;
 
-    return `🤔 ${tps.toFixed(1)} tok/s · ${genPredictedN} tokens in ${elapsedSec.toFixed(1)}s`;
+    // Build the parts of the message.
+    const parts: string[] = [];
+
+    // Turn counter for agentic loops.
+    if (turnCount > 1) {
+      parts.push(`Turn ${turnCount}`);
+    }
+
+    // Use formatDuration for consistent time display.
+    const elapsedStr = this.formatDuration(genPredictedMs / 1000);
+    parts.push(`🤔 ${tps.toFixed(1)} tok/s · ${genPredictedN} tokens in ${elapsedStr}`);
+
+    return parts.join(" · ");
   }
 
   private formatDuration(seconds: number): string {
-    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;
+    if (seconds < 60) return `${seconds.toFixed(1)}s`;
     const m = Math.floor(seconds / 60);
     const s = Math.round(seconds % 60);
     return `${m}m ${s}s`;
@@ -759,7 +860,7 @@ export class InferenceStatusManager {
       const { totalTokens, cachedTokens, newTokens, elapsedMs } = prefillSnapshot;
       const tps = elapsedMs > 0 ? ((totalTokens - cachedTokens) / elapsedMs) * 1000 : 0;
       parts.push(
-        `Prefill: ${totalTokens} tok${cachedTokens > 0 ? `, ${cachedTokens} cached, ${newTokens} new` : ""}, ${(elapsedMs / 1000).toFixed(1)}s @ ${tps.toFixed(1)} tok/s`,
+        `Prefill: ${totalTokens} tok${cachedTokens > 0 ? `, ${cachedTokens} cached, ${newTokens} new` : ""}, ${this.formatDuration(elapsedMs / 1000)} @ ${tps.toFixed(1)} tok/s`,
       );
     }
 
@@ -768,7 +869,7 @@ export class InferenceStatusManager {
       const tps = genPredictedMs > 0 ? (genPredictedN / genPredictedMs) * 1000 : 0;
       if (tps <= MAX_REASONABLE_TPS && isFinite(tps)) {
         parts.push(
-          `Gen: ${genPredictedN} tokens in ${(genPredictedMs / 1000).toFixed(1)}s @ ${tps.toFixed(1)} tok/s`,
+          `Gen: ${genPredictedN} tokens in ${this.formatDuration(genPredictedMs / 1000)} @ ${tps.toFixed(1)} tok/s`,
         );
       }
     }
