@@ -303,6 +303,10 @@ export class InferenceStatusManager {
 		this.refreshUiRef(ctx);
 		if (model) loadingModel = model;
 		this.resetForNewRequest();
+		// Increment turn counter for agentic loop tracking.
+		// Done here (not in captureTimings) because captureTimings fires for every
+		// fetch response from the server, including retries and non-chat calls.
+		turnCount++;
 	}
 
 	/**
@@ -451,9 +455,6 @@ export class InferenceStatusManager {
 
 		// Capture `this` for use inside the stream callback (arrow function)
 		const self = this;
-
-		// Increment turn counter for agentic loop tracking.
-		turnCount++;
 
 		return new ReadableStream({
 			async start(controller) {
