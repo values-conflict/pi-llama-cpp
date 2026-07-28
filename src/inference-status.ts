@@ -37,7 +37,7 @@ let prefillSnapshot: {
 // Persisted final stats from the last completed turn (survives reset).
 let finalPromptTokens: number | null = null;
 let finalPromptMs: number | null = null;
-let finalPromptCached: number | null = null;
+let _finalPromptCached: number | null = null;
 let finalPredictedTokens: number | null = null;
 let finalPredictedMs: number | null = null;
 
@@ -56,7 +56,7 @@ let originalFetch: typeof fetch | null = null;
 // Generation-phase state — populated from `timings` in each SSE chunk
 let genPredictedN = 0;
 let genPredictedMs = 0;
-let genCacheTokens = 0;
+let _genCacheTokens = 0;
 let hasGenerationData = false;
 let genComplete = false;
 
@@ -67,7 +67,7 @@ let turnCount = 0;
 const serverUrls: string[] = [];
 
 // Sampling params captured from request body (deferred display).
-let samplingParams: { temperature?: number; topP?: number } | null = null;
+let _samplingParams: { temperature?: number; topP?: number } | null = null;
 
 // Loading state tracking
 let loadingModel: string | null = null;
@@ -144,26 +144,24 @@ export class InferenceStatusManager {
 		originalFetch = globalThis.fetch;
 
 		if (serverUrl) serverUrls.push(normalizeBaseUrl(serverUrl));
-
-		const self = this;
 		globalThis.fetch = async (input: any, init?: any) => {
 			const url = typeof input === "string" ? input : (input?.url ?? "");
-			if (!self.isLlamaCppUrl(url)) {
+			if (!this.isLlamaCppUrl(url)) {
 				return originalFetch!(input, init);
 			}
 
 			try {
-				self.ensureStreamOptions(input, init);
+				this.ensureStreamOptions(input, init);
 
 				const response = await originalFetch!(input, init);
 
 				// Re-assert our working message immediately after the request is sent.
 				// Pi's provider layer often overrides the working message when the fetch starts,
 				// so we need to push our status again to prevent it from falling back to "Working...".
-				self.updateWorkingMessage();
+				this.updateWorkingMessage();
 
 				if (response.ok && response.body) {
-					return new Response(self.captureTimings(response.body), {
+					return new Response(this.captureTimings(response.body), {
 						status: response.status,
 						statusText: response.statusText,
 						headers: new Headers(response.headers),
@@ -173,7 +171,7 @@ export class InferenceStatusManager {
 			} catch (err) {
 				_lastError = err instanceof Error ? err.message : String(err);
 				_phase = "error";
-				self.updateWorkingMessage();
+				this.updateWorkingMessage();
 				throw err; // still propagate so Pi handles retry/fallback
 			}
 		};
@@ -367,14 +365,6 @@ export class InferenceStatusManager {
 		}
 	}
 
-	private clearWorkingMessage(): void {
-		if (uiRef && hasUIRef) {
-			try {
-				uiRef.setWorkingMessage();
-			} catch {}
-		}
-	}
-
 	// ─── URL matching ────────────────────────────────────────────────────
 
 	private isLlamaCppUrl(url: string): boolean {
@@ -383,16 +373,16 @@ export class InferenceStatusManager {
 
 	// ─── Request body modification ───────────────────────────────────────
 
-	private ensureStreamOptions(input: any, init?: any): void {
+	private ensureStreamOptions(_input: any, init?: any): void {
 		try {
-			let body = init?.body;
+			const body = init?.body;
 			if (!body) return;
 
 			const isString = typeof body === "string";
 			const p = isString ? JSON.parse(body) : { ...body };
 
 			// Capture sampling params for deferred display.
-			samplingParams = {
+			_samplingParams = {
 				temperature: typeof p.temperature === "number" ? p.temperature : undefined,
 				topP: typeof p.top_p === "number" ? p.top_p : undefined,
 			};
@@ -435,12 +425,12 @@ export class InferenceStatusManager {
 
 		genPredictedN = 0;
 		genPredictedMs = 0;
-		genCacheTokens = 0;
+		_genCacheTokens = 0;
 		hasGenerationData = false;
 		genComplete = false;
 
 		prefillSnapshot = null;
-		samplingParams = null;
+		_samplingParams = null;
 
 		// Fallback: if no SSE data arrives within 2s, assume we are queued or server is slow.
 		_queueTimeout = setTimeout(() => {
@@ -516,7 +506,7 @@ export class InferenceStatusManager {
 				if (prefillSnapshot) {
 					finalPromptTokens = prefillSnapshot.totalTokens;
 					finalPromptMs = prefillSnapshot.elapsedMs;
-					finalPromptCached = prefillSnapshot.cachedTokens;
+					_finalPromptCached = prefillSnapshot.cachedTokens;
 				}
 
 				if (_queueTimeout) clearTimeout(_queueTimeout);
@@ -603,7 +593,7 @@ export class InferenceStatusManager {
 		// cache_n is the total cached tokens for this request. Capture it from timings.
 		const cacheN = t.cache_n as number | undefined;
 		if (cacheN != null) {
-			genCacheTokens = cacheN;
+			_genCacheTokens = cacheN;
 		}
 
 		// Record start time on first timings chunk
@@ -656,7 +646,7 @@ export class InferenceStatusManager {
 			// show them alongside the waiting message.
 			if (finalPredictedTokens && finalPredictedMs) {
 				const tps = finalPredictedMs > 0 ? (finalPredictedTokens / finalPredictedMs) * 1000 : 0;
-				if (tps <= MAX_REASONABLE_TPS && isFinite(tps)) {
+				if (tps <= MAX_REASONABLE_TPS && Number.isFinite(tps)) {
 					const parts: string[] = ["⏳ Waiting..."];
 					if (finalPromptTokens && finalPromptMs) {
 						parts.push(`Prompt: ${finalPromptTokens}t / ${this.formatDuration(finalPromptMs)}`);
@@ -821,9 +811,9 @@ export class InferenceStatusManager {
 		if (!hasGenerationData || genPredictedN === 0) return "Generating...";
 
 		// Use server-side GPU timing, not wall-clock.
-		let tps = genPredictedMs > 0 ? (genPredictedN / genPredictedMs) * 1000 : 0;
+		const tps = genPredictedMs > 0 ? (genPredictedN / genPredictedMs) * 1000 : 0;
 		// Discard bogus spikes from early-chunk edge cases where predicted_ms rounds to near-zero.
-		if (tps > MAX_REASONABLE_TPS || !isFinite(tps)) return "Generating...";
+		if (tps > MAX_REASONABLE_TPS || !Number.isFinite(tps)) return "Generating...";
 
 		// Build the parts of the message.
 		const parts: string[] = [];
@@ -871,7 +861,7 @@ export class InferenceStatusManager {
 		// Generation stats — shown only after generation is complete (genComplete flag).
 		if (genComplete && hasGenerationData && genPredictedN > 0) {
 			const tps = genPredictedMs > 0 ? (genPredictedN / genPredictedMs) * 1000 : 0;
-			if (tps <= MAX_REASONABLE_TPS && isFinite(tps)) {
+			if (tps <= MAX_REASONABLE_TPS && Number.isFinite(tps)) {
 				parts.push(
 					`Gen: ${genPredictedN} tokens in ${this.formatDuration(genPredictedMs)} @ ${tps.toFixed(1)} tok/s`,
 				);

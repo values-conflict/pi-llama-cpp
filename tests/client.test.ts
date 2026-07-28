@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { formatBytes, normalizeLlamaServerUrl, llamaInferenceUrl } from "../src/client";
+import { describe, expect, it } from "vitest";
+import { formatBytes, llamaInferenceUrl, normalizeLlamaServerUrl } from "../src/client";
 
 describe("formatBytes", () => {
 	it("formats bytes", () => {

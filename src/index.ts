@@ -1,6 +1,6 @@
-import { readStoredCredential, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { InferenceStatusManager } from "./inference-status";
-import { LLAMA_PROVIDER_ID, createLlamaProvider } from "./provider";
+import { createLlamaProvider, LLAMA_PROVIDER_ID } from "./provider";
 
 /** Normalize a server URL: strip trailing slashes and /v1. */
 function normalizeBaseUrl(url: string): string {

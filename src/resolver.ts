@@ -1,4 +1,4 @@
-import { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 /** Default thinking budgets mapped to Pi's thinking levels. */
