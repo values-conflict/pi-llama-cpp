@@ -55,8 +55,7 @@ export default async function (pi: ExtensionAPI) {
 			if (!authResult) return;
 
 			const envUrl = authResult.env?.LLAMA_BASE_URL;
-			const serverUrl =
-				typeof envUrl === "string" && envUrl.trim() ? normalizeBaseUrl(envUrl) : undefined;
+			const serverUrl = typeof envUrl === "string" && envUrl.trim() ? normalizeBaseUrl(envUrl) : undefined;
 			if (!serverUrl) return;
 
 			inferenceStatus.updateServerUrl(serverUrl);
@@ -72,10 +71,7 @@ export default async function (pi: ExtensionAPI) {
 	}
 
 	/** Thinking budget injection for before_provider_request events. */
-	async function injectThinkingBudget(
-		event: { payload: unknown },
-		ctx: ExtensionContext,
-	): Promise<void> {
+	async function injectThinkingBudget(event: { payload: unknown }, ctx: ExtensionContext): Promise<void> {
 		const payload = event.payload as Record<string, unknown> | undefined;
 		if (!payload || typeof payload.model !== "string") return;
 
@@ -145,9 +141,7 @@ export default async function (pi: ExtensionAPI) {
 	// ─── Event handlers ──────────────
 
 	pi.on("before_provider_request", async (event, ctx) => {
-		const payloadModel = (event.payload as Record<string, unknown> | undefined)?.model as
-			| string
-			| undefined;
+		const payloadModel = (event.payload as Record<string, unknown> | undefined)?.model as string | undefined;
 
 		// Update UI context, reset state, and start queue detection.
 		inferenceStatus?.onBeforeProviderRequest(ctx, payloadModel);

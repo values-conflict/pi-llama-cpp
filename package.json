@@ -1,39 +1,41 @@
 {
-  "name": "pi-llama-cpp",
-  "version": "1.0.0",
-  "description": "Pi extension for llama.cpp integration. Dynamic provider with inference status tracking and thinking budget support.",
-  "keywords": [
-    "pi",
-    "pi-package",
-    "pi-extension",
-    "llama-cpp"
-  ],
-  "author": "Gabriel Sanhueza",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/gsanhueza/pi-llama-cpp.git"
-  },
-  "homepage": "https://github.com/gsanhueza/pi-llama-cpp#readme",
-  "bugs": {
-    "url": "https://github.com/gsanhueza/pi-llama-cpp/issues"
-  },
-  "pi": {
-    "extensions": [
-      "./src/index.ts"
-    ]
-  },
-  "scripts": {
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-ai": "^0.82.1",
-    "@earendil-works/pi-coding-agent": "^0.82.1"
-  },
-  "devDependencies": {
-    "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
-  }
+	"name": "pi-llama-cpp",
+	"version": "1.0.0",
+	"description": "Pi extension for llama.cpp integration. Dynamic provider with inference status tracking and thinking budget support.",
+	"keywords": [
+		"pi",
+		"pi-package",
+		"pi-extension",
+		"llama-cpp"
+	],
+	"author": "Gabriel Sanhueza",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/gsanhueza/pi-llama-cpp.git"
+	},
+	"homepage": "https://github.com/gsanhueza/pi-llama-cpp#readme",
+	"bugs": {
+		"url": "https://github.com/gsanhueza/pi-llama-cpp/issues"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"scripts": {
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit",
+		"format": "biome format --write ."
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "^0.82.1",
+		"@earendil-works/pi-coding-agent": "^0.82.1"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.5",
+		"typescript": "^7.0.2",
+		"vitest": "^4.1.10"
+	}
 }

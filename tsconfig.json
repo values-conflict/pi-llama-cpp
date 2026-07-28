@@ -1,13 +1,13 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "commonjs",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "noEmit": true
-  },
-  "include": ["src/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["src/upstream/**/*"]
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "commonjs",
+		"moduleResolution": "bundler",
+		"strict": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"noEmit": true
+	},
+	"include": ["src/**/*.ts", "tests/**/*.ts"],
+	"exclude": ["src/upstream/**/*"]
 }
