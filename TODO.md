@@ -16,6 +16,8 @@
 
 - the Prefilling percentages are often different from what I see in the server logs - the server will say `0.93` but the progress bar will say `90%` (or sometimes even further apart) - is that expected?
   - similarly, the estimated time to completion of prefilling will often say `0ms` for several minutes, or say `6m` for more like 10 -- are those *our* estimates, or the server's?
+  - turns out it's because we're showing *actual* prefill, not *total* (our code subtracts cached) -- we should instead present cached with more of the solid block characters: █ (Full, U+2588), ▓ (Dark, U+2593), ▒ (Medium, U+2592), ░ (Light, U+2591); ie: Prefilling... ██████▒▒▒▒▒░░░░░░  69% [33%+36%] or something
+  - we could do something similar to bring back the "loading models all share one progress bar" like ██████▓▓▓▓▓▒▒▒▒░░░ -- but maybe that's overkill?
 
 - could we draw a cute little "spark line" of the live tok/s rate over time?
   - it's not perfect, but we could just fit the most recent X amount of time over a series of ▁▂▃▄▅▆▇█ scaled to the highest and lowest values
