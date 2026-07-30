@@ -90,8 +90,9 @@ function formatBytes(bytes: number): string {
 }
 
 function progressBar(ratio: number): string {
-	const filled = Math.round(Math.max(0, Math.min(1, ratio)) * 20);
-	return "█".repeat(filled) + "░".repeat(20 - filled);
+	const width = 20;
+	const filled = Math.floor(Math.max(0, Math.min(1, ratio)) * width);
+	return "█".repeat(filled) + "░".repeat(width - filled);
 }
 
 function parseLoadProgress(
