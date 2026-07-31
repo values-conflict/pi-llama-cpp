@@ -101,10 +101,17 @@ function formatBytes(bytes: number): string {
 	return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)} ${unit}`;
 }
 
-function progressBar(ratio: number): string {
+function progressBar(ratio: number, prefilledRatio?: number): string {
 	const width = 20;
 	const filled = Math.floor(Math.max(0, Math.min(1, ratio)) * width);
-	return `${"█".repeat(filled) + "░".repeat(width - filled)} ${(ratio * 100).toFixed(0).padStart(3)}%`;
+	const prefilled = prefilledRatio !== undefined ? Math.floor(Math.max(0, Math.min(1, prefilledRatio)) * width) : 0;
+	const processing = filled - prefilled;
+	const remaining = width - filled;
+	const bar =
+		prefilledRatio !== undefined
+			? `${"█".repeat(prefilled)}${"▒".repeat(processing)}${"░".repeat(remaining)}`
+			: `${"█".repeat(filled)}${"░".repeat(remaining)}`;
+	return `${bar} ${(ratio * 100).toFixed(0).padStart(3)}%`;
 }
 
 function parseLoadProgress(
@@ -714,12 +721,11 @@ export class InferenceStatusManager {
 			return hasGenerationData ? this.getStatsMessage() : "Generating...";
 		}
 
-		// Adjust progress to reflect actual work (not cached tokens), matching upstream.
 		const cacheCount = currentProgress.cache ?? 0;
-		const actualTotal = Math.max(currentProgress.total! - cacheCount, 1);
-		const actualDone = Math.max((currentProgress.processed ?? 0) - cacheCount, 0);
+		const total = currentProgress.total!;
+		const processed = currentProgress.processed ?? 0;
 
-		const parts: string[] = [`Prefilling... ${progressBar(actualDone / actualTotal)}`];
+		const parts: string[] = [`Prefilling... ${progressBar(processed / total, cacheCount / total)}`];
 
 		// Don't show TPS/ETA until actual prefill work has happened.
 		// The initial progress update from llama.cpp fires before any decode,
