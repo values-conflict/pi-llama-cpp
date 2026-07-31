@@ -1,6 +1,5 @@
-- why do I have to do a full `/reload` for pi to pick up context size changes from the model default vs the loaded model?
-
 - split provider and stats into separate repositories
+  - now complicated by our SSE listener providing us the event that tells us it is time to re-ask the server how big the context is so that when the model finally loads we replace the default 128k context window size with the real server value 😂
 
 - progress/status during "compacting context"
 - upstream web UI (has progress bars / live status)? llama.cpp/tools/ui/src/lib/stores/chat.svelte.ts

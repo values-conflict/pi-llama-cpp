@@ -55,6 +55,11 @@ function toPiModel(model: LlamaModelInfo, serverUrl: string): Model<"openai-comp
 export interface LlamaProviderController {
 	provider: Provider<"openai-completions">;
 	setCatalog(models: readonly LlamaModelInfo[], serverUrl: string): void;
+	/**
+	 * DEVIATION FROM UPSTREAM: polls /models and updates the catalog.
+	 * Called when SSE signals a model has loaded (real n_ctx is now known).
+	 */
+	refresh(serverUrl: string, apiKey?: string): Promise<void>;
 }
 
 /**
@@ -71,6 +76,12 @@ export function createLlamaProvider(): LlamaProviderController {
 	// DEVIATION FROM UPSTREAM: show ALL models (not just loaded ones). llama.cpp auto-loads on first request, so users can freely pick any available model and it loads automatically.
 	const setCatalog = (catalog: readonly LlamaModelInfo[], serverUrl: string): void => {
 		models = catalog.map((model) => toPiModel(model, serverUrl));
+	};
+
+	// DEVIATION FROM UPSTREAM: refresh catalog from the live server.
+	const refresh = async (serverUrl: string, apiKey?: string): Promise<void> => {
+		const catalog = await new LlamaClient(serverUrl, apiKey).list();
+		setCatalog(catalog, serverUrl);
 	};
 
 	const provider: Provider<"openai-completions"> = {
@@ -143,5 +154,6 @@ export function createLlamaProvider(): LlamaProviderController {
 		streamSimple: (model, context, options) => streamSimple(model, context, options),
 	};
 
-	return { provider, setCatalog };
+	// DEVIATION FROM UPSTREAM: also returns `refresh` for live catalog updates.
+	return { provider, setCatalog, refresh };
 }

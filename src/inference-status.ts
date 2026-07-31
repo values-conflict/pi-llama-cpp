@@ -136,7 +136,15 @@ function sumDownloadProgress(data: unknown): { done: number; total: number } | u
 
 // ─── Manager ────────────────────────────────────────────────────────────
 
+export type OnModelLoadedCallback = (modelId: string) => void;
+
 export class InferenceStatusManager {
+	/**
+	 * Called when a model transitions to "loaded" status via /models/sse.
+	 * Use to trigger catalog refreshes so Pi picks up the real context size.
+	 */
+	onModelLoaded: OnModelLoadedCallback | null = null;
+
 	/**
 	 * Install the global fetch interceptor. Call once at extension init.
 	 */
@@ -241,6 +249,10 @@ export class InferenceStatusManager {
 					downloadProgress = null;
 					this.updateWorkingMessage();
 				}
+			}
+			if (status === "loaded") {
+				// Notify extension so it can refresh the catalog (real n_ctx is now known).
+				this.onModelLoaded?.(modelId);
 			}
 		}
 

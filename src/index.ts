@@ -45,6 +45,22 @@ export default async function (pi: ExtensionAPI) {
 	// Register the dynamic provider with Pi
 	pi.registerProvider(controller.provider);
 
+	/** Push the current catalog to Pi's model registry.
+	 * Re-registers the provider so Pi picks up updated context sizes
+	 * (e.g., real n_ctx after a model finishes loading).
+	 */
+	function pushCatalog(): void {
+		try {
+			pi.registerProvider(controller.provider);
+		} catch {
+			// Re-registration failed — catalog is still available via getModels().
+		}
+	}
+
+	// Stored auth for the onModelLoaded callback (no ExtensionContext available there).
+	let authServerUrl: string | null = null;
+	let authApiKey: string | undefined;
+
 	/** Refresh catalog from the live server and update Pi's model registry. */
 	async function refreshCatalog(ctx: ExtensionContext): Promise<void> {
 		try {
@@ -61,10 +77,12 @@ export default async function (pi: ExtensionAPI) {
 			inferenceStatus.updateServerUrl(serverUrl);
 			inferenceStatus.connect(serverUrl, authResult.auth.apiKey);
 
-			const { LlamaClient } = await import("./client");
-			const client = new LlamaClient(serverUrl, authResult.auth.apiKey);
-			const catalog = await client.list();
-			controller.setCatalog(catalog, serverUrl);
+			// Store for the onModelLoaded callback (no ExtensionContext available there).
+			authServerUrl = serverUrl;
+			authApiKey = authResult.auth.apiKey;
+
+			await controller.refresh(serverUrl, authResult.auth.apiKey);
+			pushCatalog();
 		} catch {
 			// Catalog refresh failed — models stay at last known state.
 		}
@@ -119,6 +137,9 @@ export default async function (pi: ExtensionAPI) {
 			try {
 				const catalog = await client.list({ signal: ac.signal });
 				controller.setCatalog(catalog, serverUrl);
+				// Store for the onModelLoaded callback.
+				authServerUrl = serverUrl;
+				authApiKey = apiKey;
 			} catch {
 				// Server not reachable — will retry on session_start.
 			}
@@ -128,12 +149,25 @@ export default async function (pi: ExtensionAPI) {
 	}
 
 	let inferenceStatus: InferenceStatusManager;
+
 	try {
 		inferenceStatus = new InferenceStatusManager();
 		inferenceStatus.install(serverUrl);
 		if (serverUrl) {
 			inferenceStatus.connect(serverUrl, resolveApiKey());
 		}
+
+		// Refresh catalog when SSE signals a model has loaded.
+		// llama.cpp only knows n_ctx after loading, so the initial catalog has fallback 128000.
+		inferenceStatus.onModelLoaded = async (_modelId: string) => {
+			if (!authServerUrl) return;
+			try {
+				await controller.refresh(authServerUrl, authApiKey);
+				pushCatalog();
+			} catch {
+				// Refresh failed — catalog stays at last known state.
+			}
+		};
 	} catch {
 		inferenceStatus = null as any;
 	}
