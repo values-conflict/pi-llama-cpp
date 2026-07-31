@@ -41,9 +41,21 @@ let _finalPromptCached: number | null = null;
 let finalPredictedTokens: number | null = null;
 let finalPredictedMs: number | null = null;
 
-// Track instantaneous TPS measurements for rate curve fitting (prefill)
-const rateHistory: { processed: number; tps: number }[] = [];
-const MAX_RATE_POINTS = 20;
+// Track instantaneous TPS measurements for EMA-based ETA (prefill)
+const rateHistory: { tps: number }[] = [];
+const MAX_RATE_POINTS = 50;
+
+// Exponential moving average smoothing factor for TPS.
+// Lower = more weight on recent measurements (adapts faster to slowdowns).
+// 0.3 means latest sample is 30% of the EMA, smoothed history is 70%.
+const EMA_ALPHA = 0.3;
+
+// Conservative multiplier applied to ETA to account for inevitable prefill slowdown
+// as KV cache fills and potential batch-size halving under memory pressure.
+const ETA_SAFETY_MULTIPLIER = 1.5;
+
+// Minimum number of rate samples before showing an ETA.
+const MIN_SAMPLES_FOR_ETA = 3;
 
 // Minimum meaningful time delta (ms) to avoid bogus TPS from sub-ms precision.
 const MIN_DELTA_MS = 1;
@@ -561,10 +573,10 @@ export class InferenceStatusManager {
 		currentProgress = { total, processed, time_ms: timeMs, cache };
 		hasReceivedPrefill = true;
 
-		// Record instantaneous TPS for curve fitting.
+		// Record instantaneous TPS for EMA-based ETA.
 		const instTps = this.computeInstantaneousTps(processed ?? 0, prevProcessed, timeMs ?? 0, prevTimeMs);
 		if (instTps != null) {
-			rateHistory.push({ processed: processed ?? 0, tps: instTps });
+			rateHistory.push({ tps: instTps });
 			if (rateHistory.length > MAX_RATE_POINTS) rateHistory.shift();
 		}
 
@@ -706,40 +718,51 @@ export class InferenceStatusManager {
 		const cacheCount = currentProgress.cache ?? 0;
 		const actualTotal = Math.max(currentProgress.total! - cacheCount, 1);
 		const actualDone = Math.max((currentProgress.processed ?? 0) - cacheCount, 0);
-		const pct = (actualDone / actualTotal) * 100;
-		const filled = Math.round((pct / 100) * 20);
-		const bar = "█".repeat(filled) + "░".repeat(20 - filled);
 
-		let suffix = "";
-		if (currentProgress.time_ms && currentProgress.processed > 0) {
+		const parts: string[] = [`Prefilling... ${progressBar(actualDone / actualTotal)}`];
+
+		// Don't show TPS/ETA until actual prefill work has happened.
+		// The initial progress update from llama.cpp fires before any decode,
+		// with processed == cache hits and time_ms near zero — producing bogus
+		// TPS like 50000.0 tok/s. Wait until we've processed enough tokens
+		// and elapsed enough time for a meaningful rate.
+		const MIN_PROC_FOR_RATE = 10;
+		const MIN_ELAPSED_MS = 50;
+		if (
+			currentProgress.time_ms &&
+			currentProgress.processed > cacheCount + MIN_PROC_FOR_RATE &&
+			currentProgress.time_ms > MIN_ELAPSED_MS
+		) {
 			const processed = currentProgress.processed;
 			const timeMs = currentProgress.time_ms;
-			const elapsedSec = timeMs / 1000;
 
-			// Instantaneous TPS from delta (falls back to average on bogus spikes).
+			// ETA via EMA of recent TPS with conservative safety margin
+			const etaSec = this.estimateEta(processed, currentProgress.total!);
+			if (etaSec) {
+				parts.push(this.formatDuration(etaSec * 1000));
+			}
+
+			// Instantaneous TPS from delta (falls back to EMA on bogus spikes).
 			const instTps = this.computeInstantaneousTps(processed, prevProcessed, timeMs, prevTimeMs);
 			let tps: string;
 			if (instTps != null) {
 				tps = `${instTps.toFixed(1)} tok/s`;
 			} else {
-				// Fallback to average TPS. Guard against tiny elapsedSec and cap outliers.
-				const avgTps = elapsedSec >= 0.001 ? processed / elapsedSec : 0;
-				tps = `${Math.min(avgTps, MAX_REASONABLE_TPS).toFixed(1)} tok/s`;
+				// Fallback to EMA-based TPS.
+				tps = this.getEmiTps();
 			}
-
-			// ETA via rate curve model or fallback to average
-			const etaSec = this.estimateEta(processed, currentProgress.total!);
-
-			suffix = `${this.formatDuration(etaSec * 1000)} · ${tps}`;
+			if (tps) {
+				parts.push(tps);
+			}
 		}
 
 		// Append cache info when there are hits.
 		if (cacheCount > 0) {
 			const newTokens = Math.max((currentProgress.processed ?? 0) - cacheCount, 0);
-			suffix += ` · ${cacheCount} cached / ${newTokens} new`;
+			parts.push(`${cacheCount} cached / ${newTokens} new`);
 		}
 
-		return `Prefilling... ${bar} ${pct.toFixed(0).padStart(3)}%${suffix ? ` · ${suffix}` : ""}`;
+		return parts.join(" · ");
 	}
 
 	// ─── Rate estimation helpers ────────────────────────────────────────
@@ -762,60 +785,64 @@ export class InferenceStatusManager {
 		return tps <= MAX_REASONABLE_TPS ? tps : null;
 	}
 
+	/**
+	 * Compute the EMA-based TPS for display as a fallback when instantaneous
+	 * TPS is unreliable.
+	 */
+	private getEmiTps(): string {
+		if (rateHistory.length < 2) {
+			return "... tok/s";
+		}
+
+		let emaTps = rateHistory[0]!.tps;
+		for (let i = 1; i < rateHistory.length; i++) {
+			emaTps = EMA_ALPHA * rateHistory[i]!.tps + (1 - EMA_ALPHA) * emaTps;
+		}
+
+		if (emaTps <= 0 || emaTps > MAX_REASONABLE_TPS) {
+			return "... tok/s";
+		}
+
+		return `${emaTps.toFixed(1)} tok/s`;
+	}
+
+	/**
+	 * Estimate remaining time using an exponential moving average (EMA) of
+	 * instantaneous TPS, with a conservative safety multiplier.
+	 *
+	 * Prefill throughput naturally degrades as the KV cache fills (each new
+	 * batch attends to all previous tokens), and can drop discontinuously when
+	 * llama.cpp halves the batch size under KV cache pressure. A simple
+	 * average or linear curve-fit overfits the fast early measurements and
+	 * produces wildly optimistic ETAs. EMA with low alpha adapts to the
+	 * slowdown as it happens, and the safety multiplier adds headroom for
+	 * the inevitable degradation ahead.
+	 */
 	private estimateEta(processed: number, total: number): number {
+		if (rateHistory.length < MIN_SAMPLES_FOR_ETA) {
+			return 0; // not enough data yet
+		}
+
 		const cacheCount = currentProgress?.cache ?? 0;
 		const effectiveTotal = Math.max(total - cacheCount, processed);
 
 		if (processed >= effectiveTotal) return 0;
 
-		const fit = this.fitRateCurve();
-		if (!fit) {
-			// Fallback: use average TPS over actual work.
-			const avgTps = rateHistory.reduce((s, p) => s + p.tps, 0) / rateHistory.length;
-			return avgTps > 0 ? (effectiveTotal - processed) / avgTps : 0;
+		// Compute EMA of TPS, weighted toward recent measurements.
+		// We iterate oldest-to-newest so the latest sample dominates.
+		let emaTps = rateHistory[0]!.tps;
+		for (let i = 1; i < rateHistory.length; i++) {
+			emaTps = EMA_ALPHA * rateHistory[i]!.tps + (1 - EMA_ALPHA) * emaTps;
 		}
 
-		const { slope, intercept } = fit;
+		if (emaTps <= 0) return 0;
 
-		// Flat curve — use average TPS over actual work.
-		if (Math.abs(slope) < 0.001) {
-			const avgTps = rateHistory.reduce((s, p) => s + p.tps, 0) / rateHistory.length;
-			return avgTps > 0 ? (effectiveTotal - processed) / avgTps : 0;
-		}
+		// Remaining work is measured in "processed" units (which includes cached tokens).
+		// The EMA TPS is in the same units (delta of processed / delta of time).
+		const remainingMs = ((effectiveTotal - processed) / emaTps) * 1000;
 
-		// Integral of 1/(slope*x+intercept) from processed to effectiveTotal
-		const a = slope * effectiveTotal + intercept;
-		const b = slope * processed + intercept;
-		if (a <= 0 || b <= 0) {
-			const avgTps = rateHistory.reduce((s, p) => s + p.tps, 0) / rateHistory.length;
-			return avgTps > 0 ? (effectiveTotal - processed) / avgTps : 0;
-		}
-
-		if (a / b <= 0) return 0;
-		return Math.log(a / b) / slope;
-	}
-
-	private fitRateCurve(): { slope: number; intercept: number } | null {
-		const n = rateHistory.length;
-		if (n < 2) return null;
-
-		let sumX = 0,
-			sumY = 0,
-			sumXY = 0,
-			sumX2 = 0;
-		for (const pt of rateHistory) {
-			sumX += pt.processed;
-			sumY += pt.tps;
-			sumXY += pt.processed * pt.tps;
-			sumX2 += pt.processed * pt.processed;
-		}
-
-		const denom = n * sumX2 - sumX * sumX;
-		if (denom === 0) return null;
-
-		const slope = (n * sumXY - sumX * sumY) / denom;
-		const intercept = (sumY - slope * sumX) / n;
-		return { slope, intercept };
+		// Apply conservative safety multiplier.
+		return remainingMs * ETA_SAFETY_MULTIPLIER;
 	}
 
 	/**
