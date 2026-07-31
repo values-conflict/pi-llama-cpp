@@ -196,8 +196,8 @@ export default async function (pi: ExtensionAPI) {
 		void refreshCatalog(ctx);
 	});
 
-	pi.on("turn_start", (_event, ctx) => {
-		inferenceStatus?.onTurnStart(ctx);
+	pi.on("turn_start", (event, ctx) => {
+		inferenceStatus?.onTurnStart(ctx, event);
 	});
 
 	pi.on("before_agent_start", (_event, ctx) => {
@@ -206,6 +206,10 @@ export default async function (pi: ExtensionAPI) {
 
 	pi.on("turn_end", (_event, _ctx) => {
 		inferenceStatus?.onTurnEnd(_ctx);
+	});
+
+	pi.on("session_before_tree", () => {
+		inferenceStatus?.reset();
 	});
 
 	pi.on("session_shutdown", async () => {

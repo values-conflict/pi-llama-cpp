@@ -73,7 +73,7 @@ let hasGenerationData = false;
 let genComplete = false;
 
 // Agentic loop tracking
-let turnCount = 0;
+let turnIndex: number | undefined;
 
 // Server URLs to match against for the fetch interceptor.
 const serverUrls: string[] = [];
@@ -312,7 +312,7 @@ export class InferenceStatusManager {
 		loadingModel = null;
 		loadingProgress = null;
 		downloadProgress = null;
-		turnCount = 0;
+		turnIndex = undefined;
 	}
 
 	/**
@@ -328,23 +328,20 @@ export class InferenceStatusManager {
 	// ─── Public hooks for Pi events ──────────────────────────────────────
 
 	/**
-	 * Called before each agent run / provider request.
+	 * Called before each provider request.
 	 */
 	onBeforeProviderRequest(ctx: { ui?: any; hasUI?: boolean }, model?: string): void {
 		this.refreshUiRef(ctx);
 		if (model) loadingModel = model;
 		this.resetForNewRequest();
-		// Increment turn counter for agentic loop tracking.
-		// Done here (not in captureTimings) because captureTimings fires for every
-		// fetch response from the server, including retries and non-chat calls.
-		turnCount++;
 	}
 
 	/**
-	 * Called at the start of each turn. Refreshes UI ref.
+	 * Called at the start of each turn. Refreshes UI ref and stores turn index.
 	 */
-	onTurnStart(ctx: { ui?: any; hasUI?: boolean }): void {
+	onTurnStart(ctx: { ui?: any; hasUI?: boolean }, event?: { turnIndex?: number }): void {
 		this.refreshUiRef(ctx);
+		if (event?.turnIndex != null) turnIndex = event.turnIndex;
 	}
 
 	private refreshUiRef(ctx: { ui?: any; hasUI?: boolean }): void {
@@ -864,9 +861,9 @@ export class InferenceStatusManager {
 		// Build the parts of the message.
 		const parts: string[] = [];
 
-		// Turn counter for agentic loops.
-		if (turnCount > 1) {
-			parts.push(`Turn ${turnCount}`);
+		// Turn counter for agentic loops (0-based from Pi's turn_start event).
+		if (turnIndex !== undefined && turnIndex > 0) {
+			parts.push(`Turn ${turnIndex}`);
 		}
 
 		// Use formatDuration for consistent time display.

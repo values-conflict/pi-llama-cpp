@@ -8,5 +8,3 @@
 
 - could we draw a cute little "spark line" of the live tok/s rate over time?
   - it's not perfect, but we could just fit the most recent X amount of time over a series of ▁▂▃▄▅▆▇█ scaled to the highest and lowest values
-
-- if I `/reload` or use `/tree` to rewind time, the `turnCount` won't be correct, right?  is there any way to fix that?
