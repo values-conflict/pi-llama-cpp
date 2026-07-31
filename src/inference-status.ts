@@ -104,13 +104,12 @@ function formatBytes(bytes: number): string {
 function progressBar(ratio: number, prefilledRatio?: number): string {
 	const width = 20;
 	const filled = Math.floor(Math.max(0, Math.min(1, ratio)) * width);
-	const prefilled = prefilledRatio !== undefined ? Math.floor(Math.max(0, Math.min(1, prefilledRatio)) * width) : 0;
+	const prefilled = prefilledRatio ? Math.floor(Math.max(0, Math.min(1, prefilledRatio)) * width) : 0;
 	const processing = filled - prefilled;
 	const remaining = width - filled;
-	const bar =
-		prefilledRatio !== undefined
-			? `${"█".repeat(prefilled)}${"▒".repeat(processing)}${"░".repeat(remaining)}`
-			: `${"█".repeat(filled)}${"░".repeat(remaining)}`;
+	const bar = prefilledRatio
+		? `${"█".repeat(prefilled)}${"▒".repeat(processing)}${"░".repeat(remaining)}`
+		: `${"█".repeat(filled)}${"░".repeat(remaining)}`;
 	return `${bar} ${(ratio * 100).toFixed(0).padStart(3)}%`;
 }
 
