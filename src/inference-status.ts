@@ -92,7 +92,7 @@ function formatBytes(bytes: number): string {
 function progressBar(ratio: number): string {
 	const width = 20;
 	const filled = Math.floor(Math.max(0, Math.min(1, ratio)) * width);
-	return "█".repeat(filled) + "░".repeat(width - filled);
+	return `${"█".repeat(filled) + "░".repeat(width - filled)} ${(ratio * 100).toFixed(0).padStart(3)}%`;
 }
 
 function parseLoadProgress(
@@ -645,13 +645,13 @@ export class InferenceStatusManager {
 			const { ratio, stage, totalStages } = loadingProgress;
 			const ratioVal = ratio ?? 0;
 			const stageIdx = 1; // simplified stage index
-			return `⏳ Loading ${stage || "model"} (stage ${stageIdx}/${totalStages || 1}) ${progressBar(ratioVal)} ${(ratioVal * 100).toFixed(0).padStart(3)}%`;
+			return `⏳ Loading ${stage || "model"} (stage ${stageIdx}/${totalStages || 1}) ${progressBar(ratioVal)}`;
 		}
 
 		if (_phase === "downloading" && downloadProgress) {
 			const { done, total } = downloadProgress;
 			const ratio = done / total;
-			return `⏳ Downloading ${progressBar(ratio)} ${(ratio * 100).toFixed(0).padStart(3)}% · ${formatBytes(done)} / ${formatBytes(total)}`;
+			return `⏳ Downloading ${progressBar(ratio)} · ${formatBytes(done)} / ${formatBytes(total)}`;
 		}
 
 		// Queued state
