@@ -9,3 +9,5 @@
 - could we draw a cute little "spark line" of the live tok/s rate over time?
   - it's not perfect, but we could just fit the most recent X amount of time over a series of ▁▂▃▄▅▆▇█ scaled to the highest and lowest values
   - I guess this won't be very interesting because it'll be mostly flat
+
+- I *frequently* get `❌ Connection error: This operation was aborted` right after submitting a prompt -- I'm sure it's some quirk of the backend server state killing my SSE connection right away for some reason, but we should investigate and ideate on ways we could improve that experience because it's jarring to be met with an error *immediately* after sending a prompt and it being queued successfully (perhaps as soon as the SSE connection is safely re-established we can clear the error state even if we haven't received any events yet?)
