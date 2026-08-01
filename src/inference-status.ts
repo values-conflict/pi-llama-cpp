@@ -101,16 +101,13 @@ function formatBytes(bytes: number): string {
 	return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)} ${unit}`;
 }
 
-function progressBar(ratio: number, prefilledRatio?: number): string {
+function progressBar(ratio: number, prefilledRatio = 0): string {
 	const width = 20;
 	const filled = Math.floor(Math.max(0, Math.min(1, ratio)) * width);
-	const prefilled = prefilledRatio ? Math.floor(Math.max(0, Math.min(1, prefilledRatio)) * width) : 0;
+	const prefilled = Math.floor(Math.max(0, Math.min(1, prefilledRatio)) * width);
 	const processing = filled - prefilled;
 	const remaining = width - filled;
-	const bar = prefilledRatio
-		? `${"█".repeat(prefilled)}${"▒".repeat(processing)}${"░".repeat(remaining)}`
-		: `${"█".repeat(filled)}${"░".repeat(remaining)}`;
-	return `${bar} ${(ratio * 100).toFixed(0).padStart(3)}%`;
+	return `${"▒".repeat(prefilled)}${"█".repeat(processing)}${"░".repeat(remaining)} ${(ratio * 100).toFixed(0).padStart(3)}%`;
 }
 
 function parseLoadProgress(
