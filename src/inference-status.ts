@@ -41,21 +41,22 @@ let _finalPromptCached: number | null = null;
 let finalPredictedTokens: number | null = null;
 let finalPredictedMs: number | null = null;
 
-// Track instantaneous TPS measurements for EMA-based ETA (prefill)
+// Track instantaneous TPS measurements for EMA-based TPS display (prefill)
 const rateHistory: { tps: number }[] = [];
 const MAX_RATE_POINTS = 50;
 
-// Exponential moving average smoothing factor for TPS.
+// Trajectory data points for ETA estimation: (new_tokens_processed, elapsed_ms)
+// Used for cumulative average and curve-fit ETA models.
+const trajectoryPoints: { newTokens: number; elapsedMs: number }[] = [];
+const MAX_TRAJECTORY_POINTS = 100;
+
+// Minimum trajectory points before attempting a curve-fit ETA.
+const MIN_POINTS_FOR_CURVE = 5;
+
+// Exponential moving average smoothing factor for TPS display.
 // Lower = more weight on recent measurements (adapts faster to slowdowns).
 // 0.3 means latest sample is 30% of the EMA, smoothed history is 70%.
 const EMA_ALPHA = 0.3;
-
-// Conservative multiplier applied to ETA to account for inevitable prefill slowdown
-// as KV cache fills and potential batch-size halving under memory pressure.
-const ETA_SAFETY_MULTIPLIER = 1.5;
-
-// Minimum number of rate samples before showing an ETA.
-const MIN_SAMPLES_FOR_ETA = 3;
 
 // Minimum meaningful time delta (ms) to avoid bogus TPS from sub-ms precision.
 const MIN_DELTA_MS = 1;
@@ -451,6 +452,7 @@ export class InferenceStatusManager {
 		prevTimeMs = 0;
 		hasReceivedPrefill = false;
 		rateHistory.length = 0;
+		trajectoryPoints.length = 0;
 
 		genPredictedN = 0;
 		genPredictedMs = 0;
@@ -573,11 +575,22 @@ export class InferenceStatusManager {
 		currentProgress = { total, processed, time_ms: timeMs, cache };
 		hasReceivedPrefill = true;
 
-		// Record instantaneous TPS for EMA-based ETA.
+		// Record instantaneous TPS for EMA-based TPS display.
 		const instTps = this.computeInstantaneousTps(processed ?? 0, prevProcessed, timeMs ?? 0, prevTimeMs);
 		if (instTps != null) {
 			rateHistory.push({ tps: instTps });
 			if (rateHistory.length > MAX_RATE_POINTS) rateHistory.shift();
+		}
+
+		// Collect trajectory point for ETA estimation.
+		// Track (new_tokens_processed, elapsed_ms) to model the slowdown curve.
+		if (processed !== undefined && timeMs != null) {
+			const cacheCount = cache ?? 0;
+			const newTokens = Math.max(processed - cacheCount, 0);
+			if (newTokens > 0) {
+				trajectoryPoints.push({ newTokens, elapsedMs: timeMs });
+				if (trajectoryPoints.length > MAX_TRAJECTORY_POINTS) trajectoryPoints.shift();
+			}
 		}
 
 		// Capture frozen prefill snapshot when prefill completes.
@@ -735,10 +748,11 @@ export class InferenceStatusManager {
 			const processed = currentProgress.processed;
 			const timeMs = currentProgress.time_ms;
 
-			// ETA via EMA of recent TPS with conservative safety margin
-			const etaSec = this.estimateEta(processed, currentProgress.total!);
-			if (etaSec) {
-				parts.push(this.formatDuration(etaSec * 1000));
+			// ETA: curve-fit (📈) after enough data, else cumulative average (📊)
+			const eta = this.estimateEta(processed, currentProgress.total!);
+			if (eta) {
+				const icon = eta.model === "curve" ? "📈" : "📊";
+				parts.push(`${icon} ${this.formatDuration(eta.etaMs)}`);
 			}
 
 			// Instantaneous TPS from delta (falls back to EMA on bogus spikes).
@@ -806,42 +820,118 @@ export class InferenceStatusManager {
 	}
 
 	/**
-	 * Estimate remaining time using an exponential moving average (EMA) of
-	 * instantaneous TPS, with a conservative safety multiplier.
+	 * Estimate remaining prefill time using a two-tier approach:
 	 *
-	 * Prefill throughput naturally degrades as the KV cache fills (each new
-	 * batch attends to all previous tokens), and can drop discontinuously when
-	 * llama.cpp halves the batch size under KV cache pressure. A simple
-	 * average or linear curve-fit overfits the fast early measurements and
-	 * produces wildly optimistic ETAs. EMA with low alpha adapts to the
-	 * slowdown as it happens, and the safety multiplier adds headroom for
-	 * the inevitable degradation ahead.
+	 * 📊 Cumulative average (always available): uses overall processed/time ratio.
+	 *    Naturally captures slowdown because cumulative average drops as prefill
+	 *    degrades — no need to predict the curve, just extrapolate the observed rate.
+	 *
+	 * 📈 Quadratic curve fit (after MIN_POINTS_FOR_CURVE data points): fits
+	 *    time = a·n + b·n² to the (new_tokens, elapsed_ms) trajectory via
+	 *    least-squares regression. The quadratic term captures the O(n²) attention
+	 *    cost growth as the KV cache fills. Extrapolates to effectiveTotal.
+	 *
+	 * Returns { etaMs, model: "cumulative" | "curve" } or null if no estimate yet.
 	 */
-	private estimateEta(processed: number, total: number): number {
-		if (rateHistory.length < MIN_SAMPLES_FOR_ETA) {
-			return 0; // not enough data yet
-		}
-
+	private estimateEta(processed: number, total: number): { etaMs: number; model: "cumulative" | "curve" } | null {
 		const cacheCount = currentProgress?.cache ?? 0;
-		const effectiveTotal = Math.max(total - cacheCount, processed);
+		const elapsedMs = currentProgress?.time_ms ?? 0;
 
-		if (processed >= effectiveTotal) return 0;
+		// New (non-cached) tokens: these are the ones that actually cost time.
+		const currentNewTokens = Math.max(processed - cacheCount, 0);
+		const totalNewTokens = Math.max(total - cacheCount, 0);
+		const remainingNewTokens = Math.max(totalNewTokens - currentNewTokens, 0);
 
-		// Compute EMA of TPS, weighted toward recent measurements.
-		// We iterate oldest-to-newest so the latest sample dominates.
-		let emaTps = rateHistory[0]!.tps;
-		for (let i = 1; i < rateHistory.length; i++) {
-			emaTps = EMA_ALPHA * rateHistory[i]!.tps + (1 - EMA_ALPHA) * emaTps;
+		if (remainingNewTokens <= 0 || currentNewTokens <= 0) return null;
+		if (elapsedMs <= 0) return null;
+
+		// Try curve-fit first if we have enough data points.
+		if (trajectoryPoints.length >= MIN_POINTS_FOR_CURVE) {
+			const curveEta = this.fitQuadraticEta(
+				trajectoryPoints,
+				currentNewTokens,
+				elapsedMs,
+				totalNewTokens,
+				remainingNewTokens,
+			);
+			if (curveEta != null && curveEta > 0) {
+				return { etaMs: curveEta, model: "curve" };
+			}
 		}
 
-		if (emaTps <= 0) return 0;
+		// Fallback to cumulative average.
+		// Cumulative TPS naturally captures slowdown — as prefill degrades,
+		// the average drops and the ETA grows accordingly.
+		const cumulativeTps = (currentNewTokens / elapsedMs) * 1000; // tokens per second
+		if (cumulativeTps <= 0) return null;
+		const etaMs = (remainingNewTokens / cumulativeTps) * 1000;
+		return { etaMs, model: "cumulative" };
+	}
 
-		// Remaining work is measured in "processed" units (which includes cached tokens).
-		// The EMA TPS is in the same units (delta of processed / delta of time).
-		const remainingMs = ((effectiveTotal - processed) / emaTps) * 1000;
+	/**
+	 * Fit time = a·n + b·n² to trajectory points via least-squares (through origin),
+	 * then extrapolate to estimate remaining time.
+	 *
+	 * x-axis: new (non-cached) tokens processed
+	 * y-axis: elapsed time in ms
+	 *
+	 * The model is forced through the origin (0 tokens → 0 time). The linear term
+	 * captures per-token overhead (tokenization, sampling, memory ops) and the
+	 * quadratic term captures attention cost growth as KV cache fills.
+	 */
+	private fitQuadraticEta(
+		points: { newTokens: number; elapsedMs: number }[],
+		currentNew: number,
+		elapsedMs: number,
+		totalNew: number,
+		remainingNew: number,
+	): number | null {
+		// Build normal equations for time = a·x + b·x² (through origin).
+		// Minimize Σ(t_i - a·x_i - b·x_i²)²
+		// Normal equations:
+		//   a·Σx² + b·Σx³ = Σ(x·t)
+		//   a·Σx³ + b·Σx⁴ = Σ(x²·t)
+		let sumX2 = 0,
+			sumX3 = 0,
+			sumX4 = 0,
+			sumXT = 0,
+			sumX2T = 0;
 
-		// Apply conservative safety multiplier.
-		return remainingMs * ETA_SAFETY_MULTIPLIER;
+		for (const p of points) {
+			const x = p.newTokens;
+			const t = p.elapsedMs;
+			const x2 = x * x;
+			const x3 = x2 * x;
+			const x4 = x3 * x;
+			sumX2 += x2;
+			sumX3 += x3;
+			sumX4 += x4;
+			sumXT += x * t;
+			sumX2T += x2 * t;
+		}
+
+		const det = sumX2 * sumX4 - sumX3 * sumX3;
+		if (Math.abs(det) < 1e-10) return null; // singular matrix
+
+		const aCoeff = (sumXT * sumX4 - sumX2T * sumX3) / det;
+		const bCoeff = (sumX2 * sumX2T - sumX3 * sumXT) / det;
+
+		// Sanity: quadratic coeff must be positive (attention cost grows).
+		// Linear coeff can be slightly negative if quadratic dominates (very long prompts).
+		if (bCoeff <= 0 || !Number.isFinite(aCoeff) || !Number.isFinite(bCoeff)) return null;
+
+		// Extrapolate: predict total elapsed time when all new tokens are processed.
+		const predictedTotalMs = aCoeff * totalNew + bCoeff * totalNew * totalNew;
+		const etaMs = predictedTotalMs - elapsedMs;
+
+		// Sanity: ETA should be positive and not wildly off from cumulative average.
+		// Cap at 10x the cumulative-average estimate to avoid bad extrapolation.
+		const cumulativeEta = (remainingNew / ((currentNew / elapsedMs) * 1000)) * 1000;
+		if (etaMs <= 0 || etaMs > cumulativeEta * 10) {
+			return null; // curve fit is nonsense, fall back to cumulative
+		}
+
+		return etaMs;
 	}
 
 	/**
@@ -875,7 +965,7 @@ export class InferenceStatusManager {
 		const seconds = ms / 1000;
 		if (seconds < 60) return `${seconds.toFixed(1)}s`;
 		const m = Math.floor(seconds / 60);
-		const s = Math.round(seconds % 60);
+		const s = Math.floor(seconds % 60); // this would be more accurate as "Math.round" but then we'll sometimes get "2m 60s" which looks insane (TODO maybe we should pre-round "seconds" before splitting it up to fix that?)
 		return `${m}m ${s}s`;
 	}
 
