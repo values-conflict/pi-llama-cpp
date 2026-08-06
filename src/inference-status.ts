@@ -53,6 +53,11 @@ const MAX_TRAJECTORY_POINTS = 100;
 // Minimum trajectory points before attempting a curve-fit ETA.
 const MIN_POINTS_FOR_CURVE = 5;
 
+// ETA countdown state: absolute wall-clock time (Date.now()) when the ETA hits zero.
+// Updated on each new progress event; display counts down from this on every render.
+let etaTargetTime: number | null = null;
+let etaModel: "cumulative" | "curve" | null = null;
+
 // Exponential moving average smoothing factor for TPS display.
 // Lower = more weight on recent measurements (adapts faster to slowdowns).
 // 0.3 means latest sample is 30% of the EMA, smoothed history is 70%.
@@ -453,6 +458,8 @@ export class InferenceStatusManager {
 		hasReceivedPrefill = false;
 		rateHistory.length = 0;
 		trajectoryPoints.length = 0;
+		etaTargetTime = null;
+		etaModel = null;
 
 		genPredictedN = 0;
 		genPredictedMs = 0;
@@ -748,11 +755,12 @@ export class InferenceStatusManager {
 			const processed = currentProgress.processed;
 			const timeMs = currentProgress.time_ms;
 
-			// ETA: curve-fit (📈) after enough data, else cumulative average (📊)
-			const eta = this.estimateEta(processed, currentProgress.total!);
-			if (eta) {
-				const icon = eta.model === "curve" ? "📈" : "📊";
-				parts.push(`${icon} ${this.formatDuration(eta.etaMs)}`);
+			// ETA: recalculate target on new progress data, then count down from it.
+			const _model = this.estimateEta(processed, currentProgress.total!);
+			if (etaTargetTime != null && etaModel != null) {
+				const etaMs = Math.max(0, etaTargetTime - Date.now());
+				const icon = etaModel === "curve" ? "📈" : "📊";
+				parts.push(`${icon} ${this.formatDuration(etaMs)}`);
 			}
 
 			// Instantaneous TPS from delta (falls back to EMA on bogus spikes).
@@ -831,9 +839,10 @@ export class InferenceStatusManager {
 	 *    least-squares regression. The quadratic term captures the O(n²) attention
 	 *    cost growth as the KV cache fills. Extrapolates to effectiveTotal.
 	 *
-	 * Returns { etaMs, model: "cumulative" | "curve" } or null if no estimate yet.
+	 * Returns the model type used, or null if no estimate yet.
+	 * Sets etaTargetTime (absolute wall-clock ms) for countdown display.
 	 */
-	private estimateEta(processed: number, total: number): { etaMs: number; model: "cumulative" | "curve" } | null {
+	private estimateEta(processed: number, total: number): "cumulative" | "curve" | null {
 		const cacheCount = currentProgress?.cache ?? 0;
 		const elapsedMs = currentProgress?.time_ms ?? 0;
 
@@ -855,7 +864,9 @@ export class InferenceStatusManager {
 				remainingNewTokens,
 			);
 			if (curveEta != null && curveEta > 0) {
-				return { etaMs: curveEta, model: "curve" };
+				etaTargetTime = Date.now() + curveEta;
+				etaModel = "curve";
+				return "curve";
 			}
 		}
 
@@ -865,7 +876,9 @@ export class InferenceStatusManager {
 		const cumulativeTps = (currentNewTokens / elapsedMs) * 1000; // tokens per second
 		if (cumulativeTps <= 0) return null;
 		const etaMs = (remainingNewTokens / cumulativeTps) * 1000;
-		return { etaMs, model: "cumulative" };
+		etaTargetTime = Date.now() + etaMs;
+		etaModel = "cumulative";
+		return "cumulative";
 	}
 
 	/**

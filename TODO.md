@@ -13,3 +13,5 @@
 - I *frequently* get `❌ Connection error: This operation was aborted` right after submitting a prompt -- I'm sure it's some quirk of the backend server state killing my SSE connection right away for some reason, but we should investigate and ideate on ways we could improve that experience because it's jarring to be met with an error *immediately* after sending a prompt and it being queued successfully (perhaps as soon as the SSE connection is safely re-established we can clear the error state even if we haven't received any events yet?)
 
 - sometimes model loading shows "Stage 1/3" for two separate model loading stages ("text", then I guess "spec" loads so fast it doesn't even show, then "mmproj" but it still says "1/3")
+
+- update AGENTS.md to note how to run the tests and how to run biome and that both should be done
