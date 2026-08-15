@@ -758,9 +758,13 @@ export class InferenceStatusManager {
 			// ETA: recalculate target on new progress data, then count down from it.
 			const _model = this.estimateEta(processed, currentProgress.total!);
 			if (etaTargetTime != null && etaModel != null) {
-				const etaMs = Math.max(0, etaTargetTime - Date.now());
+				const now = Date.now();
+				const etaMs = Math.max(0, etaTargetTime - now);
 				const icon = etaModel === "curve" ? "📈" : "📊";
-				parts.push(`${icon} ${this.formatDuration(etaMs)}`);
+				const etaDate = new Date(now + etaMs);
+				parts.push(
+					`${icon} ${this.formatDuration(etaMs)} (${etaDate.toLocaleTimeString("en-US", { hour12: false })})`,
+				);
 			}
 
 			// Instantaneous TPS from delta (falls back to EMA on bogus spikes).
