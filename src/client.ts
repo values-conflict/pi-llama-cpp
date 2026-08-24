@@ -28,6 +28,10 @@ export interface LlamaModelsResponse {
 	object?: string;
 }
 
+export interface LlamaServerProps {
+	models_autoload?: boolean;
+}
+
 export interface LlamaModelEvent {
 	model: string;
 	event: string;
@@ -105,11 +109,11 @@ function parseLoadProgress(data: unknown): LlamaProgress | undefined {
 	};
 }
 
-// DEVIATION FROM UPSTREAM: our llama.cpp server returns progress data flat (not nested under .progress).
-// Upstream does `const files = typeof nested === "object" && nested !== null ? nested : data;`
-// We iterate directly over `data` because the SSE event payload structure differs.
 function parseDownloadProgress(data: unknown): LlamaProgress | undefined {
 	if (typeof data !== "object" || data === null) return undefined;
+	// DEVIATION FROM UPSTREAM: our llama.cpp server returns progress data flat (not nested under .progress).
+	// Upstream does `const files = typeof nested === "object" && nested !== null ? nested : data;`
+	// We iterate directly over `data` because the SSE event payload structure differs.
 	let done = 0;
 	let total = 0;
 	for (const value of Object.values(data as Record<string, unknown>)) {
@@ -188,6 +192,13 @@ export class LlamaClient {
 		const data = (payload as { data: unknown[] }).data;
 		if (!data.every(isModelInfo)) throw new Error("Server is not running in llama.cpp router mode");
 		return data;
+	}
+
+	async props(options: { signal?: AbortSignal } = {}): Promise<LlamaServerProps> {
+		const payload = await this.request("/props", { signal: options.signal });
+		if (typeof payload !== "object" || payload === null) return {};
+		const { models_autoload: modelsAutoload } = payload as Record<string, unknown>;
+		return typeof modelsAutoload === "boolean" ? { models_autoload: modelsAutoload } : {};
 	}
 
 	async load(model: string, signal?: AbortSignal): Promise<void> {
