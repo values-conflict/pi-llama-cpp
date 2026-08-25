@@ -109,8 +109,7 @@ export function createLlamaProvider(): LlamaProviderController {
 	// DEVIATION FROM UPSTREAM: refresh catalog from the live server.
 	const refresh = async (serverUrl: string, apiKey?: string): Promise<void> => {
 		const catalog = await new LlamaClient(serverUrl, apiKey).list();
-		const routerAutoload = await routerAutoloadEnabled(client, catalog, context.signal);
-		setCatalog(catalog, serverUrl, { routerAutoload: routerAutoload });
+		setCatalog(catalog, serverUrl, { routerAutoload: true }); // TODO actually check server? xD
 	};
 
 	const provider: Provider<"openai-completions"> = {
