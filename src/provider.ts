@@ -11,8 +11,8 @@ import { stream, streamSimple } from "@earendil-works/pi-ai/compat";
 // DEVIATION FROM UPSTREAM: import without .ts extension (our bundler resolves it)
 import { LlamaClient, type LlamaModelInfo, llamaInferenceUrl, normalizeLlamaServerUrl } from "./client";
 
-// DEVIATION FROM UPSTREAM: ID is "llallma.cpp" for backwards compatibility with existing stored credentials.
-export const LLAMA_PROVIDER_ID = "llallma.cpp";
+// DEVIATION FROM UPSTREAM: ID is "llallama.cpp" for backwards compatibility with existing stored credentials.
+export const LLAMA_PROVIDER_ID = "llallama.cpp";
 export const DEFAULT_LLAMA_SERVER_URL = "http://127.0.0.1:8080";
 function credentialServerUrl(credential: ApiKeyCredential | undefined): string | undefined {
 	const value = credential?.env?.LLAMA_BASE_URL;
@@ -89,7 +89,7 @@ export interface LlamaProviderController {
  * Creates the llama.cpp dynamic provider.
  *
  * Deviations from upstream (src/upstream/provider.ts), marked with "DEVIATION FROM UPSTREAM" comments:
- * - Provider ID is "llallma.cpp" for backwards compatibility
+ * - Provider ID is "llallama.cpp" for backwards compatibility
  * - Display names include "(all available models)" to distinguish from Pi's built-in provider
  * - setCatalog shows ALL models, not just loaded ones (leverages llama.cpp auto-loading)
  */
