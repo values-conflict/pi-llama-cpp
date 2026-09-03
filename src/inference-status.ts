@@ -81,6 +81,14 @@ let genComplete = false;
 // Agentic loop tracking
 let turnIndex: number | undefined;
 
+// Compaction tracking — set via session_before_compact, cleared via session_compact.
+// Pi's "Compacting context..." status indicator swallows setWorkingMessage() calls,
+// so during compaction live progress is mirrored into the footer status bar instead.
+let isCompacting = false;
+
+// Label for live progress while compacting (🤏 = pinching the context down).
+const COMPACT_LABEL = "🤏 Compacting… ";
+
 // Server URLs to match against for the fetch interceptor.
 const serverUrls: string[] = [];
 
@@ -316,6 +324,7 @@ export class InferenceStatusManager {
 		loadingProgress = null;
 		downloadProgress = null;
 		turnIndex = undefined;
+		isCompacting = false;
 	}
 
 	/**
@@ -345,6 +354,12 @@ export class InferenceStatusManager {
 	onTurnStart(ctx: { ui?: any; hasUI?: boolean }, event?: { turnIndex?: number }): void {
 		this.refreshUiRef(ctx);
 		if (event?.turnIndex != null) turnIndex = event.turnIndex;
+		// A normal turn starting means any prior compaction is over. Doubles as
+		// cleanup if compaction failed and session_compact never fired.
+		if (isCompacting) {
+			isCompacting = false;
+			this.updateWorkingMessage();
+		}
 	}
 
 	private refreshUiRef(ctx: { ui?: any; hasUI?: boolean }): void {
@@ -355,6 +370,35 @@ export class InferenceStatusManager {
 	}
 
 	onTurnEnd(_ctx: { ui?: any; hasUI?: boolean }): void {
+		// Mark generation as complete so status bar shows both prefill + gen together.
+		if (hasGenerationData && genPredictedN > 0) {
+			genComplete = true;
+			this.updateStatusBar();
+		}
+
+		// Clear working message — status bar persists until next turn start / reset.
+		try {
+			uiRef?.setWorkingMessage();
+		} catch {}
+	}
+
+	/**
+	 * Called when compaction begins (session_before_compact event).
+	 */
+	onCompactStart(ctx: { ui?: any; hasUI?: boolean }): void {
+		this.refreshUiRef(ctx);
+		isCompacting = true;
+		this.updateWorkingMessage();
+	}
+
+	/**
+	 * Called when compaction ends (session_compact / session_compact_failed events).
+	 * Same cleanup as turn_end — no turn_end fires for compaction.
+	 */
+	onCompactEnd(ctx: { ui?: any; hasUI?: boolean }): void {
+		this.refreshUiRef(ctx);
+		isCompacting = false;
+
 		// Mark generation as complete so status bar shows both prefill + gen together.
 		if (hasGenerationData && genPredictedN > 0) {
 			genComplete = true;
@@ -651,7 +695,7 @@ export class InferenceStatusManager {
 	// ─── UI display ──────────────────────────────────────────────────────
 
 	private updateWorkingMessage(): void {
-		const msg = this.getProgressMessage();
+		const msg = this.withCompactLabel(this.getProgressMessage());
 		if (!msg || !uiRef || !hasUIRef) return;
 
 		try {
@@ -659,6 +703,26 @@ export class InferenceStatusManager {
 		} catch {
 			// UI may not be available in all contexts
 		}
+
+		// Pi swallows setWorkingMessage() while its "Compacting context..." indicator
+		// is active, so mirror live progress into the footer status bar instead.
+		if (isCompacting) {
+			try {
+				uiRef.setStatus(STATUS_KEY, msg);
+			} catch {
+				// UI may not be available in all contexts
+			}
+		}
+	}
+
+	/**
+	 * Labels progress messages so they're clearly compaction, not a normal turn.
+	 */
+	private withCompactLabel(msg: string | null): string | null {
+		if (!msg || !isCompacting) return msg;
+		if (msg.startsWith(COMPACT_LABEL.trimEnd())) return msg;
+		if (msg === "⏳ Waiting...") return COMPACT_LABEL.trimEnd();
+		return `${COMPACT_LABEL}${msg}`;
 	}
 
 	private getProgressMessage(): string | null {
@@ -688,6 +752,9 @@ export class InferenceStatusManager {
 
 		// Queued state
 		if (_phase === "queued") {
+			// While compacting, don't show stale stats from the last turn.
+			if (isCompacting) return COMPACT_LABEL.trimEnd();
+
 			// If we have prior final stats (from a previous turn in an agentic loop),
 			// show them alongside the waiting message.
 			if (finalPredictedTokens && finalPredictedMs) {
@@ -1005,8 +1072,9 @@ export class InferenceStatusManager {
 			);
 		}
 
-		// Generation stats — shown only after generation is complete (genComplete flag).
-		if (genComplete && hasGenerationData && genPredictedN > 0) {
+		// Generation stats — shown after generation completes (genComplete flag),
+		// or live while compacting (status bar is the only visible channel then).
+		if ((genComplete || isCompacting) && hasGenerationData && genPredictedN > 0) {
 			const tps = genPredictedMs > 0 ? (genPredictedN / genPredictedMs) * 1000 : 0;
 			if (tps <= MAX_REASONABLE_TPS && Number.isFinite(tps)) {
 				parts.push(

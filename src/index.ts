@@ -208,6 +208,14 @@ export default async function (pi: ExtensionAPI) {
 		inferenceStatus?.onTurnEnd(_ctx);
 	});
 
+	pi.on("session_before_compact", (_event, ctx) => {
+		inferenceStatus?.onCompactStart(ctx);
+	});
+
+	pi.on("session_compact", (_event, ctx) => {
+		inferenceStatus?.onCompactEnd(ctx);
+	});
+
 	pi.on("session_before_tree", () => {
 		inferenceStatus?.reset();
 	});

@@ -4,9 +4,6 @@
 - split provider and stats into separate repositories
   - now complicated by our SSE listener providing us the event that tells us it is time to re-ask the server how big the context is so that when the model finally loads we replace the default 128k context window size with the real server value 😂
 
-- progress/status during "compacting context"
-  - probably similar to during normal flow?  show a progress bar for the prompt loading stage and then a t/s during the actual compaction, but clearly labelled so it's still obviously a compaction
-
 - when we're *not* in progress (like if a slow tool command is running) we get a "stuck" looking status of the prior t/s value - can we somehow annotate that like maybe swapping the emoji from `🤔` to `👀` to make it clear this is historical?  does that update to the final values reported by the server when we finish?
 
 - could we draw a cute little "spark line" of the live tok/s rate over time?
