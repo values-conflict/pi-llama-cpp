@@ -14,4 +14,3 @@
 
 - sometimes model loading shows "Stage 1/3" for two separate model loading stages ("text", then I guess "spec" loads so fast it doesn't even show, then "mmproj" but it still says "1/3")
 
-- update AGENTS.md to note how to run the tests and how to run biome and that both should be done

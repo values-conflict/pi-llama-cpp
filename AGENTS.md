@@ -21,3 +21,12 @@ The comment on each deviation explains why it exists.
 | `index.ts` | Extension entry point, event handlers, catalog refresh logic |
 | `inference-status.ts` | Fetch interceptor for live prefill/gen timing display in Pi's UI |
 | `resolver.ts` | Thinking budget resolution from Pi settings |
+
+## Checks
+
+Both of these should be run before committing:
+
+```bash
+npm test      # vitest
+npm run biome # biome check --write .
+```
