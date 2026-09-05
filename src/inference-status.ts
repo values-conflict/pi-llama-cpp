@@ -102,7 +102,7 @@ let _samplingParams: { temperature?: number; topP?: number } | null = null;
 
 // Loading state tracking
 let loadingModel: string | null = null;
-let loadingProgress: { ratio?: number; stage?: string; totalStages?: number } | null = null;
+let loadingProgress: { ratio?: number; stage?: string; stageIndex?: number; totalStages?: number } | null = null;
 let downloadProgress: { done: number; total: number } | null = null;
 let sseAbortController: AbortController | null = null;
 
@@ -141,9 +141,10 @@ function parseLoadProgress(
 		: [];
 	const stageRatio = typeof value.value === "number" ? Math.max(0, Math.min(1, value.value)) : undefined;
 
-	let stageIndex = 0;
+	// -1 when the current stage name is absent from the stages list (or no stages list)
+	let stageIndex = -1;
 	if (stageName && stages.length > 0) {
-		stageIndex = Math.max(0, stages.indexOf(stageName));
+		stageIndex = stages.indexOf(stageName);
 	}
 
 	return {
@@ -279,6 +280,7 @@ export class InferenceStatusManager {
 					loadingProgress = {
 						ratio: loadProgress.stageRatio,
 						stage: loadProgress.name,
+						stageIndex: loadProgress.stageIndex,
 						totalStages: loadProgress.totalStages,
 					};
 					this.updateWorkingMessage();
@@ -781,7 +783,8 @@ export class InferenceStatusManager {
 		if (_phase === "loading" && loadingProgress) {
 			const { ratio, stage, totalStages } = loadingProgress;
 			const ratioVal = ratio ?? 0;
-			const stageIdx = 1; // simplified stage index
+			// 1-based for display; a missing/unknown stage name shows as stage 0.
+			const stageIdx = (loadingProgress.stageIndex ?? -1) + 1;
 			return `⏳ Loading ${stage || "model"} (stage ${stageIdx}/${totalStages || 1}) ${progressBar(ratioVal)}`;
 		}
 

@@ -9,5 +9,3 @@
 - could we draw a cute little "spark line" of the live tok/s rate over time?
   - it's not perfect, but we could just fit the most recent X amount of time over a series of ▁▂▃▄▅▆▇█ scaled to the highest and lowest values
   - I guess this won't be very interesting because it'll be mostly flat
-
-- sometimes model loading shows "Stage 1/3" for two separate model loading stages ("text", then I guess "spec" loads so fast it doesn't even show, then "mmproj" but it still says "1/3")
