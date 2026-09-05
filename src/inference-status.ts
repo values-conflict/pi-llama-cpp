@@ -86,6 +86,11 @@ let turnIndex: number | undefined;
 // so during compaction live progress is mirrored into the footer status bar instead.
 let isCompacting = false;
 
+// Whether the tracked model is currently loading/downloading per /models/sse.
+// Unlike _phase this survives per-request resets, so checkQueue can use it to
+// skip the /slots poll that the server would block for the entire load.
+let modelLoadActive = false;
+
 // Label for live progress while compacting (🤏 = pinching the context down).
 const COMPACT_LABEL = "🤏 Compacting… ";
 
@@ -188,10 +193,26 @@ export class InferenceStatusManager {
 				return originalFetch!(input, init);
 			}
 
+			// Management-plane requests we make ourselves (/models, /models/sse, /slots)
+			// pass through untouched: their aborts and timeouts are intentional and must
+			// never surface as connection errors. (The /slots queue poll is a notable case
+			// — the server blocks it for the entire model load, so our 500ms abort would
+			// otherwise flash "Connection error" on every prompt sent to an unloaded model.)
+			if (!this.isInferenceUrl(url)) {
+				return originalFetch!(input, init);
+			}
+
 			try {
 				this.ensureStreamOptions(input, init);
 
 				const response = await originalFetch!(input, init);
+
+				// The connection is up — a stale error (e.g. from an aborted earlier attempt)
+				// is no longer relevant.
+				if (_phase === "error") {
+					_phase = null;
+					_lastError = null;
+				}
 
 				// Re-assert our working message immediately after the request is sent.
 				// Pi's provider layer often overrides the working message when the fetch starts,
@@ -207,9 +228,15 @@ export class InferenceStatusManager {
 				}
 				return response;
 			} catch (err) {
-				_lastError = err instanceof Error ? err.message : String(err);
-				_phase = "error";
-				this.updateWorkingMessage();
+				// A client-side abort (user pressing Escape, Pi-level timeout) is not a
+				// connection error — Pi surfaces the cancellation itself, so don't
+				// overwrite the working message with a scary "Connection error".
+				const aborted = err instanceof Error && err.name === "AbortError";
+				if (!aborted) {
+					_lastError = err instanceof Error ? err.message : String(err);
+					_phase = "error";
+					this.updateWorkingMessage();
+				}
 				throw err; // still propagate so Pi handles retry/fallback
 			}
 		};
@@ -248,6 +275,7 @@ export class InferenceStatusManager {
 				const loadProgress = parseLoadProgress(data.progress);
 				if (loadProgress && loadProgress.stageRatio !== undefined) {
 					_phase = "loading";
+					modelLoadActive = true;
 					loadingProgress = {
 						ratio: loadProgress.stageRatio,
 						stage: loadProgress.name,
@@ -261,6 +289,7 @@ export class InferenceStatusManager {
 				const downloadSum = sumDownloadProgress(data.progress);
 				if (downloadSum && downloadSum.total > 0) {
 					_phase = "downloading";
+					modelLoadActive = true;
 					downloadProgress = downloadSum;
 					this.updateWorkingMessage();
 					return;
@@ -269,8 +298,10 @@ export class InferenceStatusManager {
 
 			if (status === "loading") {
 				_phase = "loading";
+				modelLoadActive = true;
 				this.updateWorkingMessage();
 			} else if (status === "loaded" || status === "unloaded") {
+				modelLoadActive = false;
 				// If we were explicitly tracking loading, clear it now.
 				if (_phase === "loading" || _phase === "downloading") {
 					_phase = null;
@@ -290,6 +321,7 @@ export class InferenceStatusManager {
 			const sum = sumDownloadProgress(data);
 			if (sum && sum.total > 0) {
 				_phase = "downloading";
+				modelLoadActive = true;
 				downloadProgress = sum;
 				this.updateWorkingMessage();
 			}
@@ -415,6 +447,11 @@ export class InferenceStatusManager {
 	 * Polls the server /slots endpoint to detect if the request is queued.
 	 */
 	async checkQueue(model?: string): Promise<void> {
+		// If /models/sse already told us the model is loading/downloading, the request
+		// is necessarily queued behind it — skip the poll (the server would block it
+		// for the whole load, which we'd just abort after 500ms).
+		if (modelLoadActive) return;
+
 		const baseUrl = serverUrls[serverUrls.length - 1];
 		if (!baseUrl) return;
 
@@ -448,6 +485,10 @@ export class InferenceStatusManager {
 
 	private isLlamaCppUrl(url: string): boolean {
 		return serverUrls.some((s) => url.startsWith(s));
+	}
+
+	private isInferenceUrl(url: string): boolean {
+		return url.includes("/chat/completions");
 	}
 
 	// ─── Request body modification ───────────────────────────────────────
